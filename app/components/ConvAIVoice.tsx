@@ -58,6 +58,7 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
   const bufferRef = useRef('');
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortedRef = useRef(false);
+  const listeningStartRef = useRef(0);
 
   const updateState = useCallback((s: VState) => {
     setState(s);
@@ -120,30 +121,24 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
     rec.lang = 'en-US';
 
     rec.onresult = (event: SpeechRecognitionEvent) => {
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        const result = event.results[i];
-        const text = result[0]?.transcript || '';
-
-        if (result.isFinal) {
-          bufferRef.current += ' ' + text;
-          bufferRef.current = bufferRef.current.trim();
-          setTranscript(bufferRef.current);
-
-          // Reset silence timer — wait 3s of silence then send
-          if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-          silenceTimerRef.current = setTimeout(() => {
-            if (bufferRef.current.trim()) {
-              const cmd = bufferRef.current.trim();
-              bufferRef.current = '';
-              rec.stop();
-              sendToJarvis(cmd);
-            }
-          }, 3000);
-        } else {
-          // Show interim
-          setTranscript((bufferRef.current + ' ' + text).trim());
-        }
+      let fullTranscript = '';
+      for (let i = 0; i < event.results.length; i++) {
+        fullTranscript += event.results[i][0]?.transcript || '';
       }
+      bufferRef.current = fullTranscript.trim();
+      setTranscript(bufferRef.current);
+
+      // Auto-send after 3s of no new results
+      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = setTimeout(() => {
+        if (bufferRef.current.trim()) {
+          const cmd = bufferRef.current.trim();
+          bufferRef.current = '';
+          abortedRef.current = true;
+          rec.stop();
+          sendToJarvis(cmd);
+        }
+      }, 3000);
     };
 
     rec.onerror = (e: SpeechRecognitionErrorEvent) => {
@@ -152,15 +147,40 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
     };
 
     rec.onend = () => {
+      // If we have buffered text and haven't sent yet, send it now
+      if (bufferRef.current.trim() && !abortedRef.current) {
+        if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+        const cmd = bufferRef.current.trim();
+        bufferRef.current = '';
+        sendToJarvis(cmd);
+        return;
+      }
       // Auto-restart if still in listening mode
-      if (state === 'listening' && isActive && !abortedRef.current) {
+      if (!abortedRef.current && isActive) {
         setTimeout(() => {
-          try { recognitionRef.current?.start(); } catch { /* ignore */ }
+          try {
+            abortedRef.current = false;
+            recognitionRef.current?.start();
+          } catch { /* ignore */ }
         }, 300);
       }
     };
 
     try { rec.start(); } catch { /* ignore */ }
+
+    // Safety: if no speech after 15s, auto-send whatever we have or reset
+    listeningStartRef.current = Date.now();
+    setTimeout(() => {
+      if (Date.now() - listeningStartRef.current >= 14000 && !abortedRef.current) {
+        if (bufferRef.current.trim()) {
+          const cmd = bufferRef.current.trim();
+          bufferRef.current = '';
+          abortedRef.current = true;
+          rec.stop();
+          sendToJarvis(cmd);
+        }
+      }
+    }, 15000);
   }
 
   function startConversation() {
