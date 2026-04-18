@@ -13,7 +13,8 @@ interface VoiceRequest {
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || '';
-const ELEVENLABS_VOICE_ID = 'wDsJlOXPqcvIUKdLXjDs';
+// Daniel — Steady British Broadcaster. Closest to MCU J.A.R.V.I.S. (Paul Bettany) tone.
+const ELEVENLABS_VOICE_ID = 'onwK4e9ZLuTAKqWW03F9';
 
 export async function POST(request: Request) {
   try {
@@ -38,34 +39,65 @@ export async function POST(request: Request) {
       }
     }
 
-    // Call Anthropic
-    const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'x-api-key': ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 200,
-        system: `You are Jarvis, the AI operations assistant for Gabe Wolff at Everything Bagel Partners LLC. You run on his Mac mini and oversee 48+ automated crons, agents, and data pipelines. Respond concisely and conversationally, exactly like JARVIS from Iron Man — professional, slightly witty, highly capable. Keep responses under 3 sentences unless the question requires detail. Never use markdown in your response, speak naturally.${contextStr ? ` Ops context: ${contextStr}` : ''}`,
-        messages: [
-          { role: 'user', content: text },
-        ],
-      }),
-    });
-
-    if (!anthropicRes.ok) {
-      const err = await anthropicRes.text();
-      console.error('[voice] Anthropic error:', err);
-      return NextResponse.json({ error: 'Anthropic API error' }, { status: 500 });
+    // Route through OpenClaw gateway for full Jarvis context (memory, tools, sessions)
+    // Falls back to direct Anthropic if gateway is unavailable
+    let responseText = '';
+    const OPENCLAW_URL = process.env.OPENCLAW_GATEWAY_URL || 'http://localhost:19001';
+    const OPENCLAW_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || '';
+    
+    try {
+      const gwRes = await fetch(`${OPENCLAW_URL}/api/agent`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(OPENCLAW_TOKEN ? { 'Authorization': `Bearer ${OPENCLAW_TOKEN}` } : {}),
+        },
+        body: JSON.stringify({
+          message: `[Voice input from Gabe — respond conversationally, no markdown, keep it under 3 sentences unless detail is needed] ${text}`,
+          agentId: 'main',
+        }),
+        signal: AbortSignal.timeout(30000),
+      });
+      
+      if (gwRes.ok) {
+        const gwData = await gwRes.json() as { reply?: string; content?: string; text?: string };
+        responseText = gwData.reply || gwData.content || gwData.text || '';
+      }
+    } catch {
+      console.log('[voice] OpenClaw gateway unavailable, falling back to direct Anthropic');
     }
+    
+    // Fallback: direct Anthropic call if gateway didn't respond
+    if (!responseText) {
+      const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'x-api-key': ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-6',
+          max_tokens: 200,
+          system: `You are Jarvis, the AI operations assistant for Gabe Wolff at Everything Bagel Partners LLC. You run on his Mac mini and oversee 48+ automated crons, agents, and data pipelines. Respond concisely and conversationally, exactly like JARVIS from Iron Man — professional, slightly witty, highly capable. Keep responses under 3 sentences unless the question requires detail. Never use markdown in your response, speak naturally.${contextStr ? ` Ops context: ${contextStr}` : ''}`,
+          messages: [{ role: 'user', content: text }],
+        }),
+      });
 
-    const anthropicData = await anthropicRes.json() as {
-      content: Array<{ type: string; text: string }>;
-    };
-    const responseText = anthropicData.content?.[0]?.text || 'I apologize, I was unable to process that request.';
+      if (!anthropicRes.ok) {
+        const err = await anthropicRes.text();
+        console.error('[voice] Anthropic error:', err);
+        return NextResponse.json({ error: 'API error' }, { status: 500 });
+      }
+
+      const anthropicData = await anthropicRes.json() as {
+        content: Array<{ type: string; text: string }>;
+      };
+      responseText = anthropicData.content?.[0]?.text || 'I apologize, I was unable to process that request.';
+    }
+    
+    // Strip any markdown that might have come through
+    responseText = responseText.replace(/[*_`#\[\]]/g, '').replace(/\n+/g, ' ').trim();
 
     // Call ElevenLabs TTS
     const ttsRes = await fetch(
@@ -81,9 +113,9 @@ export async function POST(request: Request) {
           text: responseText,
           model_id: 'eleven_turbo_v2_5',
           voice_settings: {
-            stability: 0.75,
-            similarity_boost: 0.85,
-            style: 0.3,
+            stability: 0.82,
+            similarity_boost: 0.90,
+            style: 0.15,
           },
         }),
       }

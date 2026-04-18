@@ -3,14 +3,14 @@ import { createToken } from '@/app/lib/auth';
 
 export const dynamic = 'force-dynamic';
 
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'ebops2026';
+const ADMIN_PASSWORD = (process.env.ADMIN_PASSWORD || 'ebops2026').trim();
 
 export async function POST(request: Request) {
   try {
     const body = await request.json() as { password?: string };
     const { password } = body;
 
-    if (!password || password !== ADMIN_PASSWORD) {
+    if (!password || password.trim() !== ADMIN_PASSWORD) {
       return NextResponse.json({ error: 'Invalid password' }, { status: 401 });
     }
 
