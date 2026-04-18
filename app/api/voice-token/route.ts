@@ -3,7 +3,7 @@ import { NextResponse } from 'next/server';
 export const dynamic = 'force-dynamic';
 
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || '';
-const AGENT_ID = 'agent_8701kph1cb49ey5rhrrhcfkqjszq';
+const AGENT_ID = 'agent_1701kph7km8mew78ehcqezs9nv43';
 
 export async function GET() {
   try {
