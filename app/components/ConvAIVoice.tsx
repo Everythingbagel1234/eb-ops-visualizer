@@ -3,9 +3,10 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 
 /**
- * JARVIS Mic Button — Browser STT → Anthropic → ElevenLabs TTS
- * Uses the EXACT same Speech Recognition pattern as the working orb VoiceInterface,
- * minus the wake word requirement.
+ * JARVIS Mic Button — ElevenLabs Conversational AI (Gemini backend)
+ * This version WORKS — confirmed by Gabe as "conversational and suitable".
+ * Uses ElevenLabs WebSocket for STT + LLM + TTS (all handled server-side).
+ * Mic mutes during agent speech to prevent self-listening feedback.
  */
 
 const AMBER = '#F59E0B';
@@ -13,196 +14,268 @@ const GOLD = '#FCD34D';
 const GREEN = '#22C55E';
 const CYAN = '#22D3EE';
 
-type VState = 'idle' | 'listening' | 'processing' | 'speaking';
-
-declare global {
-  interface Window {
-    SpeechRecognition?: new () => SpeechRecognition;
-    webkitSpeechRecognition?: new () => SpeechRecognition;
-  }
-}
-
-interface SpeechRecognition extends EventTarget {
-  continuous: boolean;
-  interimResults: boolean;
-  lang: string;
-  start(): void;
-  stop(): void;
-  abort(): void;
-  onresult: ((e: SpeechRecognitionEvent) => void) | null;
-  onerror: ((e: SpeechRecognitionErrorEvent) => void) | null;
-  onend: (() => void) | null;
-}
-interface SpeechRecognitionEvent extends Event {
-  results: SpeechRecognitionResultList;
-  resultIndex: number;
-}
-interface SpeechRecognitionErrorEvent extends Event { error: string; }
-interface SpeechRecognitionResultList { readonly length: number; [i: number]: SpeechRecognitionResult; }
-interface SpeechRecognitionResult { readonly length: number; isFinal: boolean; [i: number]: { transcript: string; confidence: number }; }
+type ConvState = 'idle' | 'connecting' | 'listening' | 'thinking' | 'speaking';
 
 interface ConvAIVoiceProps {
-  onStateChange?: (state: VState) => void;
+  onStateChange?: (state: ConvState) => void;
 }
 
 export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
-  const [state, setState] = useState<VState>('idle');
+  const [state, setState] = useState<ConvState>('idle');
   const [transcript, setTranscript] = useState('');
   const [agentText, setAgentText] = useState('');
   const [isActive, setIsActive] = useState(false);
 
-  const recognitionRef = useRef<SpeechRecognition | null>(null);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const commandBufferRef = useRef('');
-  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Use voiceState string ref to avoid stale closures (same pattern as working VoiceInterface)
-  const voiceStateRef = useRef<VState>('idle');
+  const wsRef = useRef<WebSocket | null>(null);
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const micCtxRef = useRef<AudioContext | null>(null);
+  const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const playCtxRef = useRef<AudioContext | null>(null);
+  const nextPlayTimeRef = useRef(0);
+  const isSpeakingRef = useRef(false);
 
-  const updateState = useCallback((s: VState) => {
+  const updateState = useCallback((s: ConvState) => {
     setState(s);
-    voiceStateRef.current = s;
     onStateChange?.(s);
   }, [onStateChange]);
 
-  // ─── Send to Jarvis (same as orb's sendCommand) ──────────
+  // ─── Audio Helpers ────────────────────────────────────────
 
-  async function sendCommand(text: string) {
-    if (!text.trim()) return;
-    updateState('processing');
-    setTranscript(text);
+  function downsample(buf: Float32Array, from: number, to: number): Float32Array {
+    if (from === to) return buf;
+    const ratio = from / to;
+    const len = Math.round(buf.length / ratio);
+    const out = new Float32Array(len);
+    for (let i = 0; i < len; i++) {
+      out[i] = buf[Math.min(Math.round(i * ratio), buf.length - 1)];
+    }
+    return out;
+  }
+
+  function float32ToPCM16(samples: Float32Array): ArrayBuffer {
+    const pcm = new Int16Array(samples.length);
+    for (let i = 0; i < samples.length; i++) {
+      const s = Math.max(-1, Math.min(1, samples[i]));
+      pcm[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    }
+    return pcm.buffer;
+  }
+
+  function toBase64(buf: ArrayBuffer): string {
+    const u8 = new Uint8Array(buf);
+    let s = '';
+    const CHUNK = 8192;
+    for (let i = 0; i < u8.length; i += CHUNK) {
+      const slice = u8.subarray(i, Math.min(i + CHUNK, u8.length));
+      for (let j = 0; j < slice.length; j++) s += String.fromCharCode(slice[j]);
+    }
+    return btoa(s);
+  }
+
+  function playAudioBase64(base64: string) {
+    let ctx = playCtxRef.current;
+    if (!ctx || ctx.state === 'closed') {
+      ctx = new AudioContext();
+      playCtxRef.current = ctx;
+    }
+    if (ctx.state === 'suspended') ctx.resume();
+
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    const int16 = new Int16Array(bytes.buffer);
+    const float32 = new Float32Array(int16.length);
+    for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
+
+    const audioBuf = ctx.createBuffer(1, float32.length, 16000);
+    audioBuf.getChannelData(0).set(float32);
+
+    const src = ctx.createBufferSource();
+    src.buffer = audioBuf;
+    src.connect(ctx.destination);
+
+    const now = ctx.currentTime;
+    const start = Math.max(now + 0.01, nextPlayTimeRef.current);
+    src.start(start);
+    nextPlayTimeRef.current = start + audioBuf.duration;
+  }
+
+  // ─── Mic Capture ──────────────────────────────────────────
+
+  function startMicCapture(stream: MediaStream, ws: WebSocket) {
+    const ctx = new AudioContext();
+    micCtxRef.current = ctx;
+    if (ctx.state === 'suspended') ctx.resume();
+
+    const nativeRate = ctx.sampleRate;
+    const source = ctx.createMediaStreamSource(stream);
+    sourceNodeRef.current = source;
+
+    const processor = ctx.createScriptProcessor(4096, 1, 1);
+    processorRef.current = processor;
+
+    processor.onaudioprocess = (e) => {
+      if (ws.readyState !== WebSocket.OPEN) return;
+      if (isSpeakingRef.current) return; // Mute while agent speaks
+      const raw = e.inputBuffer.getChannelData(0);
+      const down = downsample(raw, nativeRate, 16000);
+      const pcm = float32ToPCM16(down);
+      const b64 = toBase64(pcm);
+      ws.send(JSON.stringify({ user_audio_chunk: b64 }));
+    };
+
+    source.connect(processor);
+    const silentGain = ctx.createGain();
+    silentGain.gain.value = 0;
+    processor.connect(silentGain);
+    silentGain.connect(ctx.destination);
+  }
+
+  // ─── Conversation ─────────────────────────────────────────
+
+  async function startConversation() {
+    if (isActive) return;
+    setIsActive(true);
+    updateState('connecting');
+    setTranscript('');
     setAgentText('');
+    nextPlayTimeRef.current = 0;
+    isSpeakingRef.current = false;
 
     try {
-      const res = await fetch('/api/voice', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, context: {} }),
+      // 1. Mic first (iOS gesture requirement)
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
       });
+      micStreamRef.current = stream;
 
-      const data = await res.json() as { response?: string; audio?: string | null };
-      if (data.response) setAgentText(data.response);
+      // 2. Warm up playback
+      const pCtx = new AudioContext();
+      playCtxRef.current = pCtx;
+      if (pCtx.state === 'suspended') await pCtx.resume();
 
-      if (data.audio) {
-        updateState('speaking');
-        const audio = new Audio(`data:audio/mpeg;base64,${data.audio}`);
-        audioRef.current = audio;
-        audio.onended = () => {
-          updateState('idle');
-          // Auto-restart listening after response
-          setTimeout(() => {
-            if (voiceStateRef.current === 'idle') {
-              startListening();
+      // 3. Get signed URL
+      const res = await fetch('/api/voice-token');
+      const data = await res.json() as { signed_url?: string; error?: string };
+      if (!data.signed_url) throw new Error(data.error || 'No signed URL');
+
+      // 4. WebSocket
+      const ws = new WebSocket(data.signed_url);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        updateState('listening');
+        startMicCapture(stream, ws);
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data as string);
+
+          if (msg.type === 'user_transcript') {
+            const txt = msg.user_transcription_event?.user_transcript;
+            if (txt) setTranscript(txt);
+          }
+
+          if (msg.type === 'agent_response') {
+            const txt = msg.agent_response_event?.agent_response;
+            if (txt) {
+              setAgentText(prev => prev + txt);
+              updateState('thinking');
             }
-          }, 500);
-        };
-        await audio.play();
-      } else {
-        updateState('idle');
-        setTimeout(() => startListening(), 1000);
-      }
+          }
+
+          if (msg.type === 'audio') {
+            const b64 = msg.audio_event?.audio_base_64;
+            if (b64) {
+              isSpeakingRef.current = true;
+              updateState('speaking');
+              playAudioBase64(b64);
+
+              // Unmute mic after playback finishes
+              const playEnd = nextPlayTimeRef.current;
+              const ctx = playCtxRef.current;
+              if (ctx) {
+                const waitMs = Math.max(0, (playEnd - ctx.currentTime) * 1000) + 300;
+                setTimeout(() => {
+                  if (ctx && ctx.currentTime >= playEnd - 0.1) {
+                    isSpeakingRef.current = false;
+                    if (wsRef.current?.readyState === WebSocket.OPEN) {
+                      updateState('listening');
+                      setAgentText('');
+                    }
+                  }
+                }, waitMs);
+              }
+            }
+          }
+
+          if (msg.type === 'interruption') {
+            nextPlayTimeRef.current = 0;
+            isSpeakingRef.current = false;
+            setAgentText('');
+            updateState('listening');
+          }
+
+          if (msg.type === 'agent_response_correction') {
+            const txt = msg.agent_response_correction_event?.corrected_agent_response;
+            if (txt) setAgentText(txt);
+          }
+
+          if (msg.type === 'ping' && msg.ping_event) {
+            const delay = msg.ping_event.ping_ms || 0;
+            setTimeout(() => {
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'pong', event_id: msg.ping_event.event_id }));
+              }
+            }, delay);
+          }
+        } catch { /* ignore */ }
+      };
+
+      ws.onclose = () => { cleanup(); updateState('idle'); setIsActive(false); };
+      ws.onerror = () => { cleanup(); updateState('idle'); setIsActive(false); };
+
     } catch (err) {
-      console.error('[mic] Error:', err);
+      console.error('[convai]', err);
+      cleanup();
       updateState('idle');
-      setTimeout(() => startListening(), 1000);
+      setIsActive(false);
     }
   }
 
-  // ─── Speech Recognition (copied from working VoiceInterface) ──
-
-  function startListening() {
-    const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRec) return;
-
-    recognitionRef.current?.abort();
-
-    const recognition = new SpeechRec();
-    recognitionRef.current = recognition;
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = 'en-US';
-
-    commandBufferRef.current = '';
-    updateState('listening');
-
-    // EXACT same pattern as the working orb VoiceInterface
-    recognition.onresult = (event: SpeechRecognitionEvent) => {
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        const result = event.results[i];
-
-        if (result.isFinal) {
-          const finalText = result[0]?.transcript || '';
-          commandBufferRef.current += ' ' + finalText;
-          commandBufferRef.current = commandBufferRef.current.trim();
-          setTranscript(commandBufferRef.current);
-
-          // Reset silence timer — 4s of silence then send
-          if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-          silenceTimerRef.current = setTimeout(() => {
-            if (commandBufferRef.current.trim()) {
-              recognition.stop();
-              sendCommand(commandBufferRef.current.trim());
-              commandBufferRef.current = '';
-            }
-          }, 4000);
-        } else {
-          // Show interim transcript
-          const interim = commandBufferRef.current + ' ' + (result[0]?.transcript || '');
-          setTranscript(interim.trim());
-        }
-      }
-    };
-
-    recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
-      if (event.error === 'no-speech') return;
-      console.warn('[mic] Recognition error:', event.error);
-    };
-
-    // EXACT same restart pattern as working VoiceInterface
-    recognition.onend = () => {
-      if (voiceStateRef.current === 'idle' || voiceStateRef.current === 'listening') {
-        setTimeout(() => {
-          try { recognitionRef.current?.start(); } catch { /* ignore */ }
-        }, 500);
-      }
-    };
-
-    try { recognition.start(); } catch { /* ignore */ }
-  }
-
-  function startConversation() {
-    if (isActive) return;
-    setIsActive(true);
-    setTranscript('');
-    setAgentText('');
-    startListening();
-  }
-
   function stopConversation() {
-    setIsActive(false);
-    recognitionRef.current?.abort();
-    audioRef.current?.pause();
-    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-    recognitionRef.current = null;
-    audioRef.current = null;
-    commandBufferRef.current = '';
+    wsRef.current?.close();
+    cleanup();
     updateState('idle');
-    setTranscript('');
-    setAgentText('');
+    setIsActive(false);
   }
 
-  useEffect(() => () => {
-    recognitionRef.current?.abort();
-    audioRef.current?.pause();
-    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-  }, []);
+  function cleanup() {
+    processorRef.current?.disconnect();
+    sourceNodeRef.current?.disconnect();
+    micStreamRef.current?.getTracks().forEach(t => t.stop());
+    micCtxRef.current?.close().catch(() => {});
+    playCtxRef.current?.close().catch(() => {});
+    wsRef.current = null;
+    micCtxRef.current = null;
+    playCtxRef.current = null;
+    micStreamRef.current = null;
+    processorRef.current = null;
+    sourceNodeRef.current = null;
+    nextPlayTimeRef.current = 0;
+    isSpeakingRef.current = false;
+  }
+
+  useEffect(() => () => { cleanup(); }, []);
 
   // ─── Render ───────────────────────────────────────────────
-
-  const stateLabel: Record<VState, string> = {
-    idle: '', listening: '◉ LISTENING', processing: '◈ PROCESSING', speaking: '◆ SPEAKING',
+  const stateLabel: Record<ConvState, string> = {
+    idle: '', connecting: 'CONNECTING', listening: '◉ LISTENING', thinking: '◈ PROCESSING', speaking: '◆ SPEAKING',
   };
-  const stateColor: Record<VState, string> = {
-    idle: 'rgba(245,158,11,0.3)', listening: AMBER, processing: CYAN, speaking: GREEN,
+  const stateColor: Record<ConvState, string> = {
+    idle: 'rgba(245,158,11,0.3)', connecting: CYAN, listening: AMBER, thinking: CYAN, speaking: GREEN,
   };
   const color = stateColor[state];
 
