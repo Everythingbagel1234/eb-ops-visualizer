@@ -4,6 +4,7 @@ import { useEffect, useRef, useCallback, useState } from 'react';
 import type { CronJob, SecurityData, StatusResponse } from '../api/status/route';
 import type { SlackMessage } from '../api/slack/route';
 import VoiceInterface, { type VoiceState } from './VoiceInterface';
+import ConvAIVoice from './ConvAIVoice';
 
 /* ─── Constants ──────────────────────────────────────────────── */
 const AMBER   = '#F59E0B';
@@ -2017,9 +2018,8 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
         </div>
       )}
 
-      {/* ElevenLabs Conversational AI Widget — real Jarvis via Custom LLM bridge */}
-      {/* @ts-expect-error — custom web component from ElevenLabs script */}
-      <elevenlabs-convai agent-id="agent_8701kph1cb49ey5rhrrhcfkqjszq" />
+      {/* Conversational AI Voice — custom UI, real Jarvis via bridge */}
+      <ConvAIVoice />
     </div>
   );
 }
