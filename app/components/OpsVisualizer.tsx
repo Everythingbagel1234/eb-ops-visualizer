@@ -4,10 +4,14 @@ import { useEffect, useRef, useCallback, useState } from 'react';
 import type { CronJob, SecurityData, StatusResponse } from '../api/status/route';
 import type { SlackMessage } from '../api/slack/route';
 import VoiceInterface, { type VoiceState } from './VoiceInterface';
-import VoiceConversation, { type ConvVoiceState } from './VoiceConversation';
+import dynamic from 'next/dynamic';
 
 // Feature flag: use ElevenLabs Conversational AI (low-latency) vs legacy voice
 const USE_CONVERSATIONAL_AI = true;
+
+// Dynamic import to avoid SSR issues with WebRTC/MediaDevices
+const VoiceConversation = dynamic(() => import('./VoiceConversation'), { ssr: false });
+type ConvVoiceState = 'idle' | 'listening' | 'processing' | 'speaking';
 
 /* ─── Constants ──────────────────────────────────────────────── */
 const AMBER   = '#F59E0B';
