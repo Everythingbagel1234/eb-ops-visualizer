@@ -1563,6 +1563,16 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
   const [ccEntries, setCcEntries]     = useState<CCEntry[]>([]);
   const [voiceState, setVoiceState]   = useState<VoiceState>('idle');
   const [drawer, setDrawer]           = useState<DrawerContent | null>(null);
+  const [isMobile, setIsMobile]       = useState(false);
+  const [mobileSheet, setMobileSheet] = useState<'crons' | 'activity' | 'security' | null>(null);
+
+  // Mobile detection
+  useEffect(() => {
+    const check = () => setIsMobile(window.innerWidth < 768);
+    check();
+    window.addEventListener('resize', check);
+    return () => window.removeEventListener('resize', check);
+  }, []);
   const [tooltip, setTooltip]         = useState<{ x: number; y: number; job: CronJob } | null>(null);
 
   /* Clock */
@@ -1800,8 +1810,8 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
       {/* Alert bar */}
       <AlertBar errorCount={errorCount} errorJobs={errorJobs} security={security} />
 
-      {/* Left panel */}
-      <LeftPanel
+      {/* Left panel — desktop only */}
+      {!isMobile && <LeftPanel
         cronGroups={cronGroups}
         totalCrons={totalCrons}
         errorCount={errorCount}
@@ -1809,10 +1819,10 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
         feedEntries={combinedFeed}
         onCronClick={openCronDrawer}
         onFeedClick={openFeedDrawer}
-      />
+      />}
 
-      {/* Right panel */}
-      <RightPanel
+      {/* Right panel — desktop only */}
+      {!isMobile && <RightPanel
         slackMessages={slackMessages}
         slackLive={slackLive}
         security={security ?? { gapStatuses: [], activeThreats: 0, lastAudit: '', highItems: [] }}
@@ -1821,16 +1831,109 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
         ccEntries={combinedFeed}
         onMemberClick={openTeamDrawer}
         onFeedClick={openFeedDrawer}
-      />
+      />}
 
-      {/* 12h Timeline */}
-      <Timeline
+      {/* 12h Timeline — desktop only */}
+      {!isMobile && <Timeline
         feedEntries={combinedFeed}
         bottomOffset={0}
-      />
+      />}
 
-      {/* Bottom HUD */}
-      <BottomStrip status={status} now={now} />
+      {/* Bottom HUD — desktop: full strip, mobile: simplified */}
+      {!isMobile ? <BottomStrip status={status} now={now} /> : (
+        <div style={{
+          position: 'absolute', bottom: 0, left: 0, right: 0, zIndex: 15,
+          background: 'rgba(14,6,0,0.95)', borderTop: `1px solid rgba(245,158,11,0.2)`,
+          display: 'flex', justifyContent: 'space-around', alignItems: 'center',
+          padding: '10px 0 env(safe-area-inset-bottom, 10px)',
+          backdropFilter: 'blur(12px)',
+        }}>
+          {[
+            { id: 'crons' as const, icon: '⚡', label: 'Crons', badge: errorCount > 0 ? errorCount : undefined },
+            { id: 'activity' as const, icon: '📡', label: 'Activity' },
+            { id: 'security' as const, icon: '🔒', label: 'Security' },
+          ].map(tab => (
+            <button key={tab.id} onClick={() => setMobileSheet(mobileSheet === tab.id ? null : tab.id)} style={{
+              background: mobileSheet === tab.id ? 'rgba(245,158,11,0.15)' : 'transparent',
+              border: mobileSheet === tab.id ? `1px solid rgba(245,158,11,0.4)` : '1px solid transparent',
+              borderRadius: 12, padding: '8px 18px', cursor: 'pointer',
+              display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2,
+              position: 'relative',
+            }}>
+              <span style={{ fontSize: 18 }}>{tab.icon}</span>
+              <span style={{ fontSize: 8, color: mobileSheet === tab.id ? AMBER : 'rgba(245,158,11,0.5)', fontFamily: "'JetBrains Mono', monospace", letterSpacing: '0.1em', textTransform: 'uppercase' }}>{tab.label}</span>
+              {tab.badge && <span style={{ position: 'absolute', top: 2, right: 8, background: RED, color: '#fff', fontSize: 8, fontWeight: 700, borderRadius: 8, padding: '1px 5px', minWidth: 14, textAlign: 'center' }}>{tab.badge}</span>}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Mobile bottom sheet */}
+      {isMobile && mobileSheet && (
+        <>
+          <div onClick={() => setMobileSheet(null)} style={{ position: 'fixed', inset: 0, zIndex: 25, background: 'rgba(0,0,0,0.5)' }} />
+          <div style={{
+            position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 30,
+            maxHeight: '60vh', overflowY: 'auto',
+            background: 'rgba(14,6,0,0.97)', borderTop: `2px solid ${AMBER}`,
+            borderRadius: '16px 16px 0 0', padding: '12px 16px 80px',
+            fontFamily: "'JetBrains Mono', monospace",
+            backdropFilter: 'blur(16px)',
+          }}>
+            <div style={{ width: 40, height: 4, background: 'rgba(245,158,11,0.3)', borderRadius: 2, margin: '0 auto 12px' }} />
+            <div style={{ fontSize: 10, color: AMBER, letterSpacing: '0.15em', textTransform: 'uppercase', marginBottom: 10, fontWeight: 700 }}>
+              {mobileSheet === 'crons' && `\u26A1 Cron Jobs (${totalCrons})`}
+              {mobileSheet === 'activity' && '\uD83D\uDCE1 Activity Feed'}
+              {mobileSheet === 'security' && '\uD83D\uDD12 Security'}
+            </div>
+            {mobileSheet === 'crons' && Object.entries(cronGroups).map(([cat, jobs]) => (
+              <div key={cat} style={{ marginBottom: 10 }}>
+                <div style={{ fontSize: 8, color: 'rgba(245,158,11,0.5)', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 4 }}>{cat}</div>
+                {jobs.map(job => {
+                  const sc = STATUS_COLORS[job.lastStatus || 'unknown'] ?? GRAY;
+                  return (
+                    <div key={job.id} onClick={() => { setMobileSheet(null); openCronDrawer(job); }} style={{
+                      padding: '8px 10px', borderLeft: `2px solid ${sc}`, marginBottom: 4,
+                      background: 'rgba(245,158,11,0.03)', borderRadius: '0 6px 6px 0', cursor: 'pointer',
+                    }}>
+                      <div style={{ fontSize: 10, color: AMBER, fontWeight: 600 }}>{job.name}</div>
+                      <div style={{ fontSize: 8, color: 'rgba(245,158,11,0.4)', marginTop: 2 }}>
+                        {job.lastStatus?.toUpperCase()} · {job.lastRunAgo || 'never'}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
+            {mobileSheet === 'activity' && combinedFeed.slice(0, 20).map((entry, i) => (
+              <div key={i} style={{
+                padding: '8px 10px', borderLeft: `2px solid rgba(245,158,11,0.3)`, marginBottom: 4,
+                background: 'rgba(245,158,11,0.03)', borderRadius: '0 6px 6px 0',
+              }}>
+                <div style={{ fontSize: 9, color: 'rgba(245,158,11,0.5)' }}>{entry.time} · {entry.person}</div>
+                <div style={{ fontSize: 10, color: AMBER, marginTop: 2 }}>{entry.text}</div>
+              </div>
+            ))}
+            {mobileSheet === 'security' && (
+              <div style={{ fontSize: 10, color: AMBER }}>
+                <div style={{ marginBottom: 8 }}>Active Threats: <span style={{ color: (security?.activeThreats ?? 0) > 0 ? RED : GREEN, fontWeight: 700 }}>{security?.activeThreats ?? 0}</span></div>
+                <div style={{ marginBottom: 8 }}>Last Audit: {security?.lastAudit || 'N/A'}</div>
+                {security?.gapStatuses?.filter(g => g.status !== 'clean').map((gap, i) => (
+                  <div key={i} style={{ padding: '4px 0', borderBottom: '1px solid rgba(245,158,11,0.1)', fontSize: 9 }}>
+                    GAP {gap.num} — {gap.gap}: <span style={{ color: gap.status === 'critical' ? RED : AMBER, fontWeight: 600 }}>{gap.status?.toUpperCase()}</span>
+                    {gap.note && <div style={{ fontSize: 8, color: 'rgba(245,158,11,0.4)', marginTop: 2 }}>{gap.note}</div>}
+                  </div>
+                ))}
+                {security?.highItems?.map((item, i) => (
+                  <div key={i} style={{ padding: '6px 0', borderLeft: `2px solid ${RED}`, paddingLeft: 8, marginTop: 4, fontSize: 9, color: 'rgba(245,158,11,0.7)' }}>
+                    {item}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </>
+      )}
 
       {/* Detail Drawer */}
       <DetailDrawer content={drawer} onClose={() => setDrawer(null)} />
@@ -1874,11 +1977,26 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
         );
       })()}
 
+      {/* Mobile: tap hint below orb */}
+      {isMobile && voiceState === 'idle' && (
+        <div style={{
+          position: 'absolute', top: '62%', left: '50%', transform: 'translateX(-50%)',
+          zIndex: 10, pointerEvents: 'none',
+          fontSize: 9, color: 'rgba(245,158,11,0.4)', letterSpacing: '0.2em', textTransform: 'uppercase',
+          fontFamily: "'JetBrains Mono', monospace",
+          textAlign: 'center',
+          animation: 'pulse-hint 2s ease-in-out infinite',
+        }}>
+          TAP ORB TO SPEAK
+        </div>
+      )}
+      <style>{`@keyframes pulse-hint { 0%,100% { opacity: 0.3; } 50% { opacity: 0.7; } }`}</style>
+
       {/* Voice state HUD indicator */}
       {voiceState !== 'idle' && (
         <div style={{
           position: 'absolute',
-          top: topOffset + 8,
+          ...(isMobile ? { top: '60%' } : { top: topOffset + 8 }),
           left: '50%',
           transform: 'translateX(-50%)',
           zIndex: 20,
