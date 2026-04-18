@@ -42,61 +42,32 @@ export async function POST(request: Request) {
     // Route through OpenClaw Voice Bridge for full Jarvis context (memory, tools, sessions)
     // Bridge runs on Mac mini, exposed via Cloudflare tunnel with token auth
     // Falls back to direct Anthropic if bridge is unavailable
-    let responseText = '';
-    const BRIDGE_URL = process.env.VOICE_BRIDGE_URL || '';
-    const BRIDGE_TOKEN = process.env.VOICE_BRIDGE_TOKEN || '';
-    
-    if (BRIDGE_URL && BRIDGE_TOKEN) {
-      try {
-        const gwRes = await fetch(`${BRIDGE_URL}/voice`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${BRIDGE_TOKEN}`,
-          },
-          body: JSON.stringify({
-            message: `[Voice from Gabe — respond conversationally, no markdown, under 3 sentences unless detail needed] ${text}`,
-          }),
-          signal: AbortSignal.timeout(35000),
-        });
-        
-        if (gwRes.ok) {
-          const gwData = await gwRes.json() as { reply?: string; status?: string };
-          responseText = gwData.reply || '';
-        }
-      } catch {
-        console.log('[voice] Voice bridge unavailable, falling back to direct Anthropic');
-      }
-    }
-    
-    // Fallback: direct Anthropic call if gateway didn't respond
-    if (!responseText) {
-      const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'x-api-key': ANTHROPIC_API_KEY,
-          'anthropic-version': '2023-06-01',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-6',
-          max_tokens: 200,
-          system: `You are Jarvis, the AI operations assistant for Gabe Wolff at Everything Bagel Partners LLC. You run on his Mac mini and oversee 48+ automated crons, agents, and data pipelines. Respond concisely and conversationally, exactly like JARVIS from Iron Man — professional, slightly witty, highly capable. Keep responses under 3 sentences unless the question requires detail. Never use markdown in your response, speak naturally.${contextStr ? ` Ops context: ${contextStr}` : ''}`,
-          messages: [{ role: 'user', content: text }],
-        }),
-      });
+    // Direct Anthropic call — fast path (~1.5s)
+    const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 300,
+        system: `You are Jarvis, the AI Chief of Staff for Everything Bagel Partners LLC — a performance marketing agency run by Gabe Wolff. You run on his Mac mini and oversee all operations: 48+ automated crons, data pipelines, client dashboards, security monitoring, and team coordination.\n\nRespond like JARVIS from Iron Man — professional, slightly witty, highly capable. Be concise — under 3 sentences unless the question requires detail. Never use markdown. Speak naturally and conversationally.\n\nClients: Homedics, Purity Coffee, STJ Apparel, IQ Bar, Primal Bee, Dirty Dough\nTeam: Amanda (COO), John (Sr Performance Strategist), Omar (Performance Strategist), Jylle (Marketing Ops), Jeff (Creative Director)\nYou manage data from Meta Ads, Google Ads, TikTok Ads, Shopify, Klaviyo, Amazon into BigQuery.${contextStr ? `\nOps context: ${contextStr}` : ''}`,
+        messages: [{ role: 'user', content: text }],
+      }),
+    });
 
-      if (!anthropicRes.ok) {
-        const err = await anthropicRes.text();
-        console.error('[voice] Anthropic error:', err);
-        return NextResponse.json({ error: 'API error' }, { status: 500 });
-      }
-
-      const anthropicData = await anthropicRes.json() as {
-        content: Array<{ type: string; text: string }>;
-      };
-      responseText = anthropicData.content?.[0]?.text || 'I apologize, I was unable to process that request.';
+    if (!anthropicRes.ok) {
+      const err = await anthropicRes.text();
+      console.error('[voice] Anthropic error:', err);
+      return NextResponse.json({ error: 'API error' }, { status: 500 });
     }
+
+    const anthropicData = await anthropicRes.json() as {
+      content: Array<{ type: string; text: string }>;
+    };
+    let responseText = anthropicData.content?.[0]?.text || 'I apologize, I was unable to process that request.';
     
     // Strip any markdown that might have come through
     responseText = responseText.replace(/[*_`#\[\]]/g, '').replace(/\n+/g, ' ').trim();
