@@ -39,32 +39,34 @@ export async function POST(request: Request) {
       }
     }
 
-    // Route through OpenClaw gateway for full Jarvis context (memory, tools, sessions)
-    // Falls back to direct Anthropic if gateway is unavailable
+    // Route through OpenClaw Voice Bridge for full Jarvis context (memory, tools, sessions)
+    // Bridge runs on Mac mini, exposed via Cloudflare tunnel with token auth
+    // Falls back to direct Anthropic if bridge is unavailable
     let responseText = '';
-    const OPENCLAW_URL = process.env.OPENCLAW_GATEWAY_URL || 'http://localhost:19001';
-    const OPENCLAW_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || '';
+    const BRIDGE_URL = process.env.VOICE_BRIDGE_URL || '';
+    const BRIDGE_TOKEN = process.env.VOICE_BRIDGE_TOKEN || '';
     
-    try {
-      const gwRes = await fetch(`${OPENCLAW_URL}/api/agent`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(OPENCLAW_TOKEN ? { 'Authorization': `Bearer ${OPENCLAW_TOKEN}` } : {}),
-        },
-        body: JSON.stringify({
-          message: `[Voice input from Gabe — respond conversationally, no markdown, keep it under 3 sentences unless detail is needed] ${text}`,
-          agentId: 'main',
-        }),
-        signal: AbortSignal.timeout(30000),
-      });
-      
-      if (gwRes.ok) {
-        const gwData = await gwRes.json() as { reply?: string; content?: string; text?: string };
-        responseText = gwData.reply || gwData.content || gwData.text || '';
+    if (BRIDGE_URL && BRIDGE_TOKEN) {
+      try {
+        const gwRes = await fetch(`${BRIDGE_URL}/voice`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${BRIDGE_TOKEN}`,
+          },
+          body: JSON.stringify({
+            message: `[Voice from Gabe — respond conversationally, no markdown, under 3 sentences unless detail needed] ${text}`,
+          }),
+          signal: AbortSignal.timeout(35000),
+        });
+        
+        if (gwRes.ok) {
+          const gwData = await gwRes.json() as { reply?: string; status?: string };
+          responseText = gwData.reply || '';
+        }
+      } catch {
+        console.log('[voice] Voice bridge unavailable, falling back to direct Anthropic');
       }
-    } catch {
-      console.log('[voice] OpenClaw gateway unavailable, falling back to direct Anthropic');
     }
     
     // Fallback: direct Anthropic call if gateway didn't respond
