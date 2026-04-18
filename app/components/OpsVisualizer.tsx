@@ -7,7 +7,8 @@ import VoiceInterface, { type VoiceState } from './VoiceInterface';
 import dynamic from 'next/dynamic';
 
 // Feature flag: use ElevenLabs Conversational AI (low-latency) vs legacy voice
-const USE_CONVERSATIONAL_AI = true;
+// DISABLED — causing client-side crash. Reverting to legacy voice until debugged.
+const USE_CONVERSATIONAL_AI = false;
 
 // Dynamic import to avoid SSR issues with WebRTC/MediaDevices
 const VoiceConversation = dynamic(() => import('./VoiceConversation'), { ssr: false });
