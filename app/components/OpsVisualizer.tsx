@@ -1,8 +1,9 @@
 'use client';
 
 import { useEffect, useRef, useCallback, useState } from 'react';
-import type { CronJob, CommEntry, SecurityData, StatusResponse } from '../api/status/route';
+import type { CronJob, SecurityData, StatusResponse } from '../api/status/route';
 import type { SlackMessage } from '../api/slack/route';
+import VoiceInterface, { type VoiceState } from './VoiceInterface';
 
 /* ─── Constants ──────────────────────────────────────────────── */
 const AMBER   = '#F59E0B';
@@ -12,7 +13,7 @@ const GREEN   = '#22C55E';
 const RED     = '#EF4444';
 const GRAY    = '#6B7280';
 const BG      = '#050510';
-
+const CYAN    = '#22D3EE';
 
 const STATUS_COLORS: Record<string, string> = {
   ok: GREEN, error: RED, idle: GRAY, running: AMBER, unknown: GRAY,
@@ -33,6 +34,60 @@ const CAT_COLORS: Record<string, string> = {
   'Monitoring':       GREEN,
   'Scheduled Reports':'#60a5fa',
 };
+
+/* ─── Team Members ───────────────────────────────────────────── */
+interface TeamMember {
+  name: string;
+  shortName: string;
+  role: string;
+  roleAbbrev: string;
+  color: string;
+  slackNames?: string[]; // partial matches for slack/CC detection
+}
+
+const TEAM_MEMBERS: TeamMember[] = [
+  { name: 'Gabe Wolff',          shortName: 'Gabe',    role: 'CEO',                roleAbbrev: 'CEO',   color: '#FCD34D', slackNames: ['gabe', 'gabriel'] },
+  { name: 'Amanda Berkowitz',    shortName: 'Amanda',  role: 'COO',                roleAbbrev: 'COO',   color: '#A78BFA', slackNames: ['amanda', 'berkowitz'] },
+  { name: 'Jylle Ryan',          shortName: 'Jylle',   role: 'VP Lifecycle',       roleAbbrev: 'VP-LC', color: '#2DD4BF', slackNames: ['jylle', 'ryan'] },
+  { name: 'John Henry Tardiff',  shortName: 'JH',      role: 'Sr. Perf Strategist',roleAbbrev: 'SPS',   color: '#60A5FA', slackNames: ['john', 'tardiff', 'john henry'] },
+  { name: 'Jeff Laine',          shortName: 'Jeff',    role: 'Creative Director',  roleAbbrev: 'CD',    color: '#4ADE80', slackNames: ['jeff', 'laine'] },
+  { name: 'Omar Madi',           shortName: 'Omar',    role: 'Developer',          roleAbbrev: 'DEV',   color: CYAN,      slackNames: ['omar', 'madi'] },
+  { name: 'Ed Celesios',         shortName: 'Ed',      role: 'TikTok Lead',        roleAbbrev: 'TTK',   color: '#FB923C', slackNames: ['ed', 'celesios', 'edward'] },
+  { name: 'Janelle Alfonso',     shortName: 'Janelle', role: 'Design Lead',        roleAbbrev: 'DSN',   color: '#F472B6', slackNames: ['janelle', 'alfonso'] },
+  { name: 'Ronny Rincon',        shortName: 'Ronny',   role: 'Strategist',         roleAbbrev: 'STR',   color: '#A3E635', slackNames: ['ronny', 'rincon'] },
+  { name: 'Daniel Mahu',         shortName: 'Daniel',  role: 'Email Specialist',   roleAbbrev: 'EML',   color: '#818CF8', slackNames: ['daniel', 'mahu'] },
+];
+
+/* ─── Types ──────────────────────────────────────────────────── */
+interface CCEntry {
+  id: number;
+  agent_name?: string;
+  action_type?: string;
+  client_tag?: string | null;
+  input_summary?: string;
+  output_summary?: string;
+  status?: string;
+  created_at: string;
+  actor_email?: string | null;
+  actor_name?: string | null;
+  source: 'slack' | 'cc';
+  text: string;
+  person: string;
+  time: string;
+  timestamp: number;
+}
+
+interface TeamActivity {
+  member: TeamMember;
+  lastSeenAt: number | null; // unix ms
+  source: 'slack' | 'cc' | 'both' | null;
+}
+
+interface DrawerContent {
+  type: 'cron' | 'team' | 'feed';
+  title: string;
+  data: unknown;
+}
 
 /* ─── Helpers ────────────────────────────────────────────────── */
 function timeAgo(iso?: string): string {
@@ -77,6 +132,60 @@ function freshnessColor(days: number): string {
   if (days <= 1)  return GREEN;
   if (days <= 3)  return AMBER;
   return RED;
+}
+
+function formatTime(iso: string): string {
+  try {
+    const d = new Date(iso);
+    return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+  } catch { return '—'; }
+}
+
+/* ─── Team activity detection ────────────────────────────────── */
+function buildTeamActivity(slackMessages: SlackMessage[], ccEntries: CCEntry[]): TeamActivity[] {
+  return TEAM_MEMBERS.map(member => {
+    let lastSeenAt: number | null = null;
+    let foundSlack = false;
+    let foundCC = false;
+
+    const nameLower = member.slackNames || [member.shortName.toLowerCase()];
+
+    // Check Slack messages
+    for (const msg of slackMessages) {
+      const personLower = msg.person.toLowerCase();
+      if (nameLower.some(n => personLower.includes(n))) {
+        const ts = msg.timestamp * 1000;
+        if (!lastSeenAt || ts > lastSeenAt) lastSeenAt = ts;
+        foundSlack = true;
+      }
+    }
+
+    // Check CC entries
+    for (const entry of ccEntries) {
+      const actorName = (entry.actor_name || '').toLowerCase();
+      const actorEmail = (entry.actor_email || '').toLowerCase();
+      if (nameLower.some(n => actorName.includes(n) || actorEmail.includes(n))) {
+        const ts = new Date(entry.created_at).getTime();
+        if (!lastSeenAt || ts > lastSeenAt) lastSeenAt = ts;
+        foundCC = true;
+      }
+    }
+
+    const source: TeamActivity['source'] = foundSlack && foundCC ? 'both'
+      : foundSlack ? 'slack'
+      : foundCC ? 'cc'
+      : null;
+
+    return { member, lastSeenAt, source };
+  });
+}
+
+function teamActivityStatus(activity: TeamActivity): 'active' | 'recent' | 'inactive' {
+  if (!activity.lastSeenAt) return 'inactive';
+  const minsAgo = (Date.now() - activity.lastSeenAt) / 60_000;
+  if (minsAgo < 30) return 'active';
+  if (minsAgo < 240) return 'recent';
+  return 'inactive';
 }
 
 /* ─── Particle system ────────────────────────────────────────── */
@@ -160,7 +269,6 @@ function drawBg(ctx: CanvasRenderingContext2D, w: number, h: number) {
   ctx.fillStyle = BG;
   ctx.fillRect(0, 0, w, h);
 
-  // Warm center vignette
   const g = ctx.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, Math.max(w, h) * 0.65);
   g.addColorStop(0,   'rgba(40, 18, 0, 0.45)');
   g.addColorStop(0.5, 'rgba(18, 6, 0, 0.15)');
@@ -186,27 +294,32 @@ function drawOrb(
   ctx: CanvasRenderingContext2D,
   cx: number, cy: number, minDim: number, t: number,
   crons: CronJob[], gwHealthy: boolean, sessions: number,
+  voiceState: VoiceState,
 ) {
-  const orbR = minDim * 0.14;    // sphere radius
-  const tickR = minDim * 0.32;   // outer cron tick ring
+  const orbR = minDim * 0.14;
+  const tickR = minDim * 0.32;
 
-  // ── 1. Ambient glow behind orb ─────────────────────────
+  // Voice state modifiers
+  const voiceSpeedMult = voiceState === 'listening' ? 3 : voiceState === 'processing' ? 2 : 1;
+  const voiceGlowMult = voiceState !== 'idle' ? 2 : 1;
+
+  // Ambient glow
   const ambientGlow = ctx.createRadialGradient(cx, cy, orbR * 0.2, cx, cy, orbR * 4.5);
-  ambientGlow.addColorStop(0,   'rgba(245, 158, 11, 0.22)');
-  ambientGlow.addColorStop(0.3, 'rgba(180, 80, 0,  0.08)');
-  ambientGlow.addColorStop(0.7, 'rgba(100, 40, 0,  0.03)');
+  const glowAlpha = voiceState !== 'idle' ? 0.35 : 0.22;
+  ambientGlow.addColorStop(0,   `rgba(245, 158, 11, ${glowAlpha})`);
+  ambientGlow.addColorStop(0.3, 'rgba(180, 80, 0, 0.08)');
+  ambientGlow.addColorStop(0.7, 'rgba(100, 40, 0, 0.03)');
   ambientGlow.addColorStop(1,   'rgba(0, 0, 0, 0)');
   ctx.fillStyle = ambientGlow;
   ctx.beginPath(); ctx.arc(cx, cy, orbR * 4.5, 0, Math.PI * 2); ctx.fill();
 
-  // ── 2. Orbiting rings (drawn before sphere so sphere occludes inner parts) ──
-  const pulse = 0.85 + Math.sin(t * 1.2) * 0.15;  // breathing pulse
+  const pulse = 0.85 + Math.sin(t * 1.2 * voiceSpeedMult) * 0.15;
 
   const rings = [
-    { rx: orbR * 1.28, ry: orbR * 0.26, angle: t * 0.5,   color: `rgba(245,158,11,${0.55 * pulse})`,  lw: 1.5, nodes: 3 },
-    { rx: orbR * 1.42, ry: orbR * 0.44, angle: -t * 0.32 + 1.0, color: `rgba(220,107,10,${0.42 * pulse})`, lw: 1.2, nodes: 4 },
-    { rx: orbR * 1.55, ry: orbR * 0.60, angle:  t * 0.22 + 2.1,  color: `rgba(252,211,77,${0.28 * pulse})`, lw: 0.8, nodes: 2 },
-    { rx: orbR * 1.70, ry: orbR * 0.30, angle: -t * 0.16 + 0.5,  color: `rgba(245,158,11,${0.16 * pulse})`, lw: 0.6, nodes: 2 },
+    { rx: orbR * 1.28, ry: orbR * 0.26, angle: t * 0.5 * voiceSpeedMult,   color: `rgba(245,158,11,${0.55 * pulse * voiceGlowMult})`,  lw: 1.5, nodes: 3 },
+    { rx: orbR * 1.42, ry: orbR * 0.44, angle: -t * 0.32 * voiceSpeedMult + 1.0, color: `rgba(220,107,10,${0.42 * pulse * voiceGlowMult})`, lw: 1.2, nodes: 4 },
+    { rx: orbR * 1.55, ry: orbR * 0.60, angle:  t * 0.22 * voiceSpeedMult + 2.1, color: `rgba(252,211,77,${0.28 * pulse * voiceGlowMult})`, lw: 0.8, nodes: 2 },
+    { rx: orbR * 1.70, ry: orbR * 0.30, angle: -t * 0.16 * voiceSpeedMult + 0.5, color: `rgba(245,158,11,${0.16 * pulse * voiceGlowMult})`, lw: 0.6, nodes: 2 },
   ];
 
   for (const ring of rings) {
@@ -214,7 +327,6 @@ function drawOrb(
     ctx.translate(cx, cy);
     ctx.rotate(ring.angle);
 
-    // Ring itself
     ctx.strokeStyle = ring.color;
     ctx.lineWidth   = ring.lw;
     ctx.shadowBlur  = 10;
@@ -224,7 +336,6 @@ function drawOrb(
     ctx.stroke();
     ctx.shadowBlur = 0;
 
-    // Bright accent arc (about 30° arc on the ring)
     ctx.strokeStyle = `rgba(252, 211, 77, ${0.7 * pulse})`;
     ctx.lineWidth   = ring.lw * 1.8;
     ctx.shadowBlur  = 14;
@@ -234,9 +345,8 @@ function drawOrb(
     ctx.stroke();
     ctx.shadowBlur = 0;
 
-    // Nodes traveling along ring
     for (let n = 0; n < ring.nodes; n++) {
-      const theta = (n / ring.nodes) * Math.PI * 2 + t * 0.6;
+      const theta = (n / ring.nodes) * Math.PI * 2 + t * 0.6 * voiceSpeedMult;
       const px    = ring.rx * Math.cos(theta);
       const py    = ring.ry * Math.sin(theta);
       ctx.fillStyle  = GOLD;
@@ -251,36 +361,32 @@ function drawOrb(
     ctx.restore();
   }
 
-  // ── 3. Sphere: outer halo ──────────────────────────────
+  // Sphere halo
   const halo = ctx.createRadialGradient(cx, cy, orbR * 0.75, cx, cy, orbR * 1.55);
-  halo.addColorStop(0, `rgba(245, 158, 11, ${0.4 * pulse})`);
+  halo.addColorStop(0, `rgba(245, 158, 11, ${0.4 * pulse * voiceGlowMult})`);
   halo.addColorStop(0.6, `rgba(180, 80, 0, ${0.12 * pulse})`);
   halo.addColorStop(1,   'rgba(0, 0, 0, 0)');
   ctx.fillStyle = halo;
   ctx.beginPath(); ctx.arc(cx, cy, orbR * 1.55, 0, Math.PI * 2); ctx.fill();
 
-  // ── 4. Sphere: 3D fill ─────────────────────────────────
-  // Offset the highlight toward upper-left for 3D illusion
+  // Sphere 3D fill
   const hlX = cx - orbR * 0.28;
   const hlY = cy - orbR * 0.28;
   const sphereFill = ctx.createRadialGradient(hlX, hlY, orbR * 0.04, cx, cy, orbR);
   sphereFill.addColorStop(0,    `rgba(255, 240, 170, ${0.98 * pulse})`);
-  sphereFill.addColorStop(0.18, `rgba(252, 211, 77,  ${0.92 * pulse})`);
-  sphereFill.addColorStop(0.38, `rgba(245, 158, 11,  ${0.85 * pulse})`);
-  sphereFill.addColorStop(0.62, `rgba(190, 85,  5,   ${0.75})`);
-  sphereFill.addColorStop(0.82, `rgba(60,  18,  0,   0.85)`);
-  sphereFill.addColorStop(1,    'rgba(5,   5,   16,  0.95)');
+  sphereFill.addColorStop(0.18, `rgba(252, 211, 77, ${0.92 * pulse})`);
+  sphereFill.addColorStop(0.38, `rgba(245, 158, 11, ${0.85 * pulse})`);
+  sphereFill.addColorStop(0.62, `rgba(190, 85, 5,   ${0.75})`);
+  sphereFill.addColorStop(0.82, `rgba(60, 18, 0,    0.85)`);
+  sphereFill.addColorStop(1,    'rgba(5, 5, 16,     0.95)');
   ctx.fillStyle = sphereFill;
   ctx.beginPath(); ctx.arc(cx, cy, orbR, 0, Math.PI * 2); ctx.fill();
 
-  // ── 5. Sphere: wireframe grid lines (subtle) ──────────
+  // Wireframe
   ctx.save();
   ctx.beginPath(); ctx.arc(cx, cy, orbR, 0, Math.PI * 2); ctx.clip();
-
   ctx.strokeStyle = `rgba(245, 158, 11, 0.12)`;
   ctx.lineWidth   = 0.5;
-
-  // Latitude-like ellipses
   for (let i = 1; i <= 3; i++) {
     const lat = (i / 4) * Math.PI / 2;
     const r   = orbR * Math.cos(lat);
@@ -288,8 +394,6 @@ function drawOrb(
     ctx.beginPath(); ctx.ellipse(cx, cy + oy, r, r * 0.28, 0, 0, Math.PI * 2); ctx.stroke();
     ctx.beginPath(); ctx.ellipse(cx, cy - oy, r, r * 0.28, 0, 0, Math.PI * 2); ctx.stroke();
   }
-
-  // Meridian-like lines (rotating slowly)
   for (let i = 0; i < 5; i++) {
     const rot = (i / 5) * Math.PI + t * 0.04;
     ctx.save();
@@ -300,19 +404,18 @@ function drawOrb(
   }
   ctx.restore();
 
-  // ── 6. Sphere: edge ring ──────────────────────────────
-  ctx.strokeStyle = `rgba(245, 158, 11, ${0.6 + Math.sin(t * 1.4) * 0.25})`;
-  ctx.lineWidth   = 2;
-  ctx.shadowBlur  = 22;
+  // Edge ring
+  const edgeAlpha = voiceState !== 'idle' ? 0.9 + Math.sin(t * 3) * 0.1 : 0.6 + Math.sin(t * 1.4) * 0.25;
+  ctx.strokeStyle = `rgba(245, 158, 11, ${edgeAlpha})`;
+  ctx.lineWidth   = voiceState !== 'idle' ? 3 : 2;
+  ctx.shadowBlur  = voiceState !== 'idle' ? 35 : 22;
   ctx.shadowColor = AMBER;
   ctx.beginPath(); ctx.arc(cx, cy, orbR, 0, Math.PI * 2); ctx.stroke();
   ctx.shadowBlur  = 0;
 
-  // ── 7. Specular highlight + lens flare ────────────────
+  // Specular highlight
   const specX = cx - orbR * 0.28;
   const specY = cy - orbR * 0.28;
-
-  // Main highlight
   const spec = ctx.createRadialGradient(specX, specY, 0, specX, specY, orbR * 0.35);
   spec.addColorStop(0,   `rgba(255, 248, 210, ${0.75 * pulse})`);
   spec.addColorStop(0.4, `rgba(255, 220, 130, ${0.35 * pulse})`);
@@ -320,7 +423,6 @@ function drawOrb(
   ctx.fillStyle = spec;
   ctx.beginPath(); ctx.arc(specX, specY, orbR * 0.35, 0, Math.PI * 2); ctx.fill();
 
-  // Cross flare
   const flareAlpha = 0.4 * pulse;
   const flareLen   = orbR * 0.22;
   ctx.strokeStyle  = `rgba(255, 248, 200, ${flareAlpha})`;
@@ -328,8 +430,7 @@ function drawOrb(
   ctx.beginPath(); ctx.moveTo(specX - flareLen, specY); ctx.lineTo(specX + flareLen, specY); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(specX, specY - flareLen); ctx.lineTo(specX, specY + flareLen); ctx.stroke();
 
-  // ── 8. Outer tick ring (cron statuses) ────────────────
-  // CCW decorative arcs
+  // Outer tick ring
   ctx.save();
   ctx.translate(cx, cy);
   ctx.rotate(-t * 0.12);
@@ -342,7 +443,6 @@ function drawOrb(
   }
   ctx.restore();
 
-  // CW tick ring
   ctx.save();
   ctx.translate(cx, cy);
   ctx.rotate(t * 0.075);
@@ -371,7 +471,6 @@ function drawOrb(
     ctx.shadowBlur = 0;
   }
 
-  // CCW inner dashed ring
   ctx.rotate(-t * 0.075);
   ctx.rotate(t * 0.038);
   ctx.setLineDash([5, 14]);
@@ -382,21 +481,19 @@ function drawOrb(
 
   ctx.restore();
 
-  // ── 9. Labels below orb ───────────────────────────────
+  // Labels below orb
   const labelY = cy + orbR * 1.82;
   const fz = Math.max(12, minDim * 0.024);
 
-  // "J.A.R.V.I.S."
   ctx.textAlign    = 'center';
   ctx.textBaseline = 'middle';
   ctx.font         = `700 ${fz}px 'JetBrains Mono', monospace`;
   ctx.fillStyle    = AMBER;
-  ctx.shadowBlur   = 18 * pulse;
+  ctx.shadowBlur   = 18 * pulse * voiceGlowMult;
   ctx.shadowColor  = AMBER;
   ctx.fillText('J.A.R.V.I.S.', cx, labelY);
   ctx.shadowBlur   = 0;
 
-  // Gateway status
   const gwColor = gwHealthy ? GREEN : RED;
   ctx.font       = `500 ${Math.max(8, minDim * 0.015)}px 'JetBrains Mono', monospace`;
   ctx.fillStyle  = gwColor;
@@ -405,7 +502,6 @@ function drawOrb(
   ctx.fillText(`GW: ${gwHealthy ? 'ONLINE' : 'OFFLINE'}`, cx, labelY + fz * 1.4);
   ctx.shadowBlur = 0;
 
-  // Session count
   ctx.font      = `400 ${Math.max(8, minDim * 0.013)}px 'JetBrains Mono', monospace`;
   ctx.fillStyle = `rgba(245, 158, 11, 0.65)`;
   ctx.fillText(`${sessions} SESSION${sessions !== 1 ? 'S' : ''}`, cx, labelY + fz * 2.7);
@@ -418,9 +514,12 @@ interface LeftPanelProps {
   totalCrons: number;
   errorCount: number;
   topOffset: number;
+  feedEntries: CCEntry[];
+  onCronClick: (job: CronJob) => void;
+  onFeedClick: (entry: CCEntry) => void;
 }
 
-function LeftPanel({ cronGroups, totalCrons, errorCount, topOffset }: LeftPanelProps) {
+function LeftPanel({ cronGroups, totalCrons, errorCount, topOffset, feedEntries, onCronClick, onFeedClick }: LeftPanelProps) {
   const okCount   = Object.values(cronGroups).flat().filter(c => c.lastStatus === 'ok').length;
   const idleCount = Object.values(cronGroups).flat().filter(c => c.lastStatus === 'idle').length;
 
@@ -464,8 +563,8 @@ function LeftPanel({ cronGroups, totalCrons, errorCount, topOffset }: LeftPanelP
         </div>
       </div>
 
-      {/* Scrollable cron list */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: '3px 0' }}>
+      {/* Cron list - takes about 60% of space */}
+      <div style={{ flex: '6 1 0', overflowY: 'auto', padding: '3px 0' }}>
         {CRON_CATEGORIES.map(cat => {
           const jobs = cronGroups[cat] || [];
           if (jobs.length === 0) return null;
@@ -492,11 +591,15 @@ function LeftPanel({ cronGroups, totalCrons, errorCount, topOffset }: LeftPanelP
                   <div
                     key={job.id || job.name}
                     className={recent ? 'row-recent' : ''}
+                    onClick={() => onCronClick(job)}
                     style={{
                       padding: '3px 14px 3px 12px',
                       display: 'flex', alignItems: 'center', gap: 6,
                       borderLeft: recent ? `2px solid ${AMBER}` : '2px solid transparent',
+                      cursor: 'pointer',
                     }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(245,158,11,0.06)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                   >
                     <div className={`dot dot-${job.lastStatus || 'unknown'}`} style={{ flexShrink: 0 }} />
                     <div style={{ flex: 1, minWidth: 0 }}>
@@ -513,9 +616,7 @@ function LeftPanel({ cronGroups, totalCrons, errorCount, topOffset }: LeftPanelP
                         marginTop: 1, fontFamily: "'JetBrains Mono', monospace",
                       }}>
                         {displayTime || '—'}
-                        {job.model && <span style={{ opacity: 0.6, marginLeft: 6 }}>
-                          {job.model}
-                        </span>}
+                        {job.model && <span style={{ opacity: 0.6, marginLeft: 6 }}>{job.model}</span>}
                       </div>
                     </div>
                     <div style={{
@@ -537,95 +638,55 @@ function LeftPanel({ cronGroups, totalCrons, errorCount, topOffset }: LeftPanelP
           </div>
         )}
       </div>
-    </div>
-  );
-}
 
-/* ─── Right Panel: Comms (LIVE SLACK) ───────────────────────── */
-interface CommsPanelProps {
-  messages: SlackMessage[];
-  live: boolean;
-}
-
-function slackMsgColor(msg: SlackMessage): string {
-  if (msg.isGabe)  return '#FCD34D';   // warm gold
-  if (msg.isBot)   return '#F59E0B';   // amber (Jarvis / other bots)
-  return '#2DD4BF';                    // teal (team members)
-}
-
-function channelBadgeColor(channel: string): string {
-  if (channel === 'DM')        return '#FCD34D';
-  if (channel === '#activity') return '#F59E0B';
-  if (channel === '#feedback') return '#A78BFA';
-  return '#6EE7B7'; // #internal
-}
-
-function CommsSection({ messages, live }: CommsPanelProps) {
-  return (
-    <div style={{ flex: '3 1 0', overflowY: 'auto', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-      {/* Section header with LIVE dot */}
+      {/* Live Feed divider */}
       <div style={{
-        padding: '7px 14px 5px', flexShrink: 0,
-        borderBottom: '1px solid rgba(245,158,11,0.12)',
+        borderTop: '1px solid rgba(245,158,11,0.15)',
+        padding: '5px 14px 4px',
+        flexShrink: 0,
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
       }}>
-        <span className="section-header">COMMUNICATIONS</span>
-        {live && (
-          <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-            <span
-              className="live-dot"
-              style={{
-                display: 'inline-block', width: 6, height: 6, borderRadius: '50%',
-                background: '#22C55E', boxShadow: '0 0 6px #22C55E',
-                animation: 'livePulse 1.4s ease-in-out infinite',
-              }}
-            />
-            <span style={{
-              fontSize: 7.5, color: '#22C55E', letterSpacing: '0.15em',
-              fontFamily: "'JetBrains Mono', monospace", fontWeight: 700,
-            }}>LIVE</span>
-          </span>
-        )}
+        <span style={{ fontSize: 8.5, color: AMBER, letterSpacing: '0.2em', fontWeight: 700, fontFamily: "'Inter', sans-serif" }}>
+          LIVE FEED
+        </span>
+        <span style={{ display: 'flex', gap: 8, fontSize: 8 }}>
+          <span style={{ color: AMBER }}>■ SLACK</span>
+          <span style={{ color: CYAN }}>■ CC</span>
+        </span>
       </div>
 
-      <div style={{ flex: 1, overflowY: 'auto', padding: '4px 0' }}>
-        {messages.map((msg, i) => {
-          const color  = slackMsgColor(msg);
-          const badge  = channelBadgeColor(msg.channel);
-          const preview = msg.text.length > 60 ? msg.text.slice(0, 60) + '…' : msg.text;
+      {/* Combined live feed */}
+      <div style={{ flex: '4 1 0', overflowY: 'auto', padding: '2px 0' }}>
+        {feedEntries.map((entry, i) => {
+          const isSlack = entry.source === 'slack';
+          const color = isSlack ? AMBER : CYAN;
+          const preview = entry.text.length > 55 ? entry.text.slice(0, 55) + '…' : entry.text;
           return (
             <div
-              key={`${msg.timestamp}-${i}`}
-              className="activity-row slack-slide-in"
+              key={`feed-${i}`}
+              onClick={() => onFeedClick(entry)}
+              className="slack-slide-in"
               style={{
-                padding: '5px 14px',
-                borderLeft: `2px solid ${color}40`,
+                padding: '4px 12px',
+                borderLeft: `2px solid ${color}30`,
                 marginBottom: 1,
-                animationDelay: `${i * 0.04}s`,
+                cursor: 'pointer',
+                animationDelay: `${i * 0.03}s`,
               }}
+              onMouseEnter={e => (e.currentTarget.style.background = `rgba(${isSlack ? '245,158,11' : '34,211,238'},0.05)`)}
+              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
             >
-              {/* Top row: time · person → channel badge */}
               <div style={{
-                fontSize: 8, color: 'rgba(245,158,11,0.38)', marginBottom: 2,
+                fontSize: 7.5, color: 'rgba(245,158,11,0.35)',
                 fontFamily: "'JetBrains Mono', monospace",
-                display: 'flex', gap: 5, alignItems: 'center',
+                display: 'flex', gap: 4, alignItems: 'center', marginBottom: 2,
               }}>
-                <span>[{msg.time}]</span>
-                <span style={{ color, fontWeight: 700 }}>{msg.person}</span>
-                <span style={{ color: 'rgba(245,158,11,0.3)' }}>→</span>
-                <span style={{
-                  color: badge, fontWeight: 700,
-                  background: `${badge}18`,
-                  padding: '0 4px', borderRadius: 3,
-                  fontSize: 7.5,
-                }}
-                >
-                  {msg.channel}
-                </span>
+                <span style={{ color, fontWeight: 700 }}>{isSlack ? 'SLK' : 'CC'}</span>
+                <span>[{entry.time}]</span>
+                <span style={{ color, fontWeight: 700 }}>{entry.person}</span>
               </div>
-              {/* Message preview */}
               <div style={{
-                fontSize: 9.5, color: 'rgba(245,158,11,0.82)',
+                fontSize: 9, color: 'rgba(245,158,11,0.75)',
                 whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
                 fontFamily: "'JetBrains Mono', monospace",
               }}>
@@ -634,10 +695,9 @@ function CommsSection({ messages, live }: CommsPanelProps) {
             </div>
           );
         })}
-        {messages.length === 0 && (
-          <div style={{ padding: 16, textAlign: 'center', color: 'rgba(245,158,11,0.22)', fontSize: 9,
-            fontFamily: "'JetBrains Mono', monospace" }}>
-            {live ? 'NO RECENT MESSAGES…' : 'CONNECTING TO SLACK…'}
+        {feedEntries.length === 0 && (
+          <div style={{ padding: 12, textAlign: 'center', color: 'rgba(245,158,11,0.2)', fontSize: 9 }}>
+            NO RECENT ACTIVITY
           </div>
         )}
       </div>
@@ -645,13 +705,121 @@ function CommsSection({ messages, live }: CommsPanelProps) {
   );
 }
 
-/* ─── Right Panel: Security ──────────────────────────────────── */
-interface SecuritySectionProps {
-  security: SecurityData;
+/* ─── Team Heatmap ───────────────────────────────────────────── */
+interface TeamHeatmapProps {
+  teamActivity: TeamActivity[];
+  onMemberClick: (member: TeamMember, activity: TeamActivity) => void;
 }
 
-function SecuritySection({ security }: SecuritySectionProps) {
-  const { gapStatuses, activeThreats, lastAudit, highItems } = security;
+function TeamHeatmap({ teamActivity, onMemberClick }: TeamHeatmapProps) {
+  return (
+    <div style={{ flex: 1, overflowY: 'auto', padding: '6px 10px' }}>
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(2, 1fr)',
+        gap: 5,
+      }}>
+        {teamActivity.map(activity => {
+          const { member } = activity;
+          const status = teamActivityStatus(activity);
+          const dotColor = status === 'active' ? GREEN : status === 'recent' ? AMBER : GRAY;
+          const isActive = status === 'active';
+          const isRecent2 = status === 'recent';
+
+          return (
+            <div
+              key={member.name}
+              onClick={() => onMemberClick(member, activity)}
+              style={{
+                padding: '6px 8px',
+                background: isActive ? `rgba(${hexToRgb(member.color)},0.08)` : 'rgba(20,12,0,0.4)',
+                border: `1px solid ${isActive ? member.color + '50' : isRecent2 ? member.color + '25' : 'rgba(245,158,11,0.1)'}`,
+                borderRadius: 4,
+                cursor: 'pointer',
+                transition: 'all 0.2s',
+                boxShadow: isActive ? `0 0 8px ${member.color}20` : 'none',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = `rgba(${hexToRgb(member.color)},0.12)`)}
+              onMouseLeave={e => (e.currentTarget.style.background = isActive ? `rgba(${hexToRgb(member.color)},0.08)` : 'rgba(20,12,0,0.4)')}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 2 }}>
+                <div style={{
+                  width: 6, height: 6, borderRadius: '50%',
+                  background: dotColor,
+                  boxShadow: isActive ? `0 0 6px ${dotColor}` : 'none',
+                  flexShrink: 0,
+                  animation: isActive ? 'pulse-amber 1.4s ease-in-out infinite' : 'none',
+                }} />
+                <span style={{
+                  fontSize: 9, fontWeight: 700, color: member.color,
+                  fontFamily: "'JetBrains Mono', monospace",
+                  textShadow: isActive ? `0 0 6px ${member.color}` : 'none',
+                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  flex: 1,
+                }}>
+                  {member.shortName}
+                </span>
+              </div>
+              <div style={{
+                fontSize: 7.5, color: 'rgba(245,158,11,0.4)',
+                fontFamily: "'JetBrains Mono', monospace",
+                display: 'flex', justifyContent: 'space-between',
+              }}>
+                <span>{member.roleAbbrev}</span>
+                {activity.source && (
+                  <span style={{
+                    color: activity.source === 'both' ? GREEN : activity.source === 'slack' ? AMBER : CYAN,
+                    fontSize: 7,
+                  }}>
+                    {activity.source.toUpperCase()}
+                  </span>
+                )}
+              </div>
+              {activity.lastSeenAt && (
+                <div style={{
+                  fontSize: 7, color: 'rgba(245,158,11,0.3)',
+                  fontFamily: "'JetBrains Mono', monospace",
+                  marginTop: 1,
+                }}>
+                  {timeAgo(new Date(activity.lastSeenAt).toISOString())}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function hexToRgb(hex: string): string {
+  const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+  if (!result) return '245,158,11';
+  return `${parseInt(result[1], 16)},${parseInt(result[2], 16)},${parseInt(result[3], 16)}`;
+}
+
+/* ─── Right Panel (Heatmap + Comms) ─────────────────────────── */
+interface RightPanelProps {
+  slackMessages: SlackMessage[];
+  slackLive: boolean;
+  security: SecurityData;
+  topOffset: number;
+  teamActivity: TeamActivity[];
+  ccEntries: CCEntry[];
+  onMemberClick: (member: TeamMember, activity: TeamActivity) => void;
+  onFeedClick: (entry: CCEntry) => void;
+}
+
+function slackMsgColor(msg: SlackMessage): string {
+  if (msg.isGabe)  return '#FCD34D';
+  if (msg.isBot)   return '#F59E0B';
+  return '#2DD4BF';
+}
+
+
+
+function RightPanel({ slackMessages, slackLive, security, topOffset, teamActivity, ccEntries, onMemberClick, onFeedClick }: RightPanelProps) {
+  const { gapStatuses, activeThreats, lastAudit } = security;
 
   const auditTime = (() => {
     try {
@@ -660,87 +828,20 @@ function SecuritySection({ security }: SecuritySectionProps) {
     } catch { return '—'; }
   })();
 
-  return (
-    <div style={{ flex: '2 1 0', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-      <div className="right-panel-divider" />
+  // Interleaved feed for right panel (Slack + CC)
+  const allFeed: CCEntry[] = [
+    ...slackMessages.map((msg): CCEntry => ({
+      id: msg.timestamp,
+      source: 'slack',
+      text: msg.text,
+      person: msg.person,
+      time: msg.time,
+      timestamp: msg.timestamp * 1000,
+      created_at: new Date(msg.timestamp * 1000).toISOString(),
+    })),
+    ...ccEntries.filter(e => e.source === 'cc'),
+  ].sort((a, b) => b.timestamp - a.timestamp).slice(0, 12);
 
-      {/* Section header */}
-      <div style={{
-        padding: '7px 14px 5px', flexShrink: 0,
-        borderBottom: '1px solid rgba(245,158,11,0.1)',
-      }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <span className="section-header">SECURITY STATUS</span>
-          <span style={{
-            fontSize: 8, color: 'rgba(245,158,11,0.45)',
-            fontFamily: "'JetBrains Mono', monospace",
-          }}>
-            {auditTime}
-          </span>
-        </div>
-        <div style={{ display: 'flex', gap: 12, marginTop: 3, fontSize: 8,
-          fontFamily: "'JetBrains Mono', monospace" }}>
-          <span style={{
-            color: activeThreats > 0 ? RED : GREEN,
-            textShadow: `0 0 5px ${activeThreats > 0 ? RED : GREEN}`,
-          }}>
-            {activeThreats > 0 ? `⚠ ${activeThreats} CRITICAL` : '✓ NO CRITICAL'}
-          </span>
-          <span style={{ color: 'rgba(245,158,11,0.4)' }}>
-            {gapStatuses.filter(g => g.status !== 'clean').length} FLAGS
-          </span>
-        </div>
-      </div>
-
-      {/* GAP badge grid */}
-      <div style={{
-        flex: 1, overflowY: 'auto', padding: '6px 12px',
-        display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 4,
-        alignContent: 'start',
-      }}>
-        {gapStatuses.map(gap => (
-          <div
-            key={gap.gap}
-            className={`gap-badge gap-badge-${gap.status}`}
-            title={gap.note || ''}
-          >
-            <span>{gap.status === 'clean' ? '✓' : gap.status === 'critical' ? '✗' : '!'}</span>
-            <span>G{gap.num}</span>
-          </div>
-        ))}
-      </div>
-
-      {/* HIGH severity items */}
-      {highItems.length > 0 && (
-        <div style={{
-          padding: '4px 12px 8px', flexShrink: 0,
-          borderTop: '1px solid rgba(245,158,11,0.1)',
-        }}>
-          {highItems.slice(0, 3).map((item, i) => (
-            <div key={i} style={{
-              fontSize: 8, color: 'rgba(245,158,11,0.65)', padding: '2px 0',
-              whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-              fontFamily: "'JetBrains Mono', monospace",
-            }}>
-              ⚠ {item}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/* ─── Right Panel (wrapper) ──────────────────────────────────── */
-interface RightPanelProps {
-  comms: CommEntry[];
-  slackMessages: SlackMessage[];
-  slackLive: boolean;
-  security: SecurityData;
-  topOffset: number;
-}
-
-function RightPanel({ slackMessages, slackLive, security, topOffset }: RightPanelProps) {
   return (
     <div
       className="hud-panel panel-right"
@@ -751,8 +852,291 @@ function RightPanel({ slackMessages, slackLive, security, topOffset }: RightPane
     >
       <div className="panel-shimmer" />
       <div className="scan-line" style={{ animationDelay: '-2.1s' }} />
-      <CommsSection messages={slackMessages} live={slackLive} />
-      <SecuritySection security={security} />
+
+      {/* ── Team Heatmap (top ~50%) ──── */}
+      <div style={{ flex: '5 1 0', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+        <div style={{
+          padding: '7px 14px 5px', flexShrink: 0,
+          borderBottom: '1px solid rgba(245,158,11,0.12)',
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        }}>
+          <span className="section-header">TEAM STATUS</span>
+          <span style={{ fontSize: 8, color: 'rgba(245,158,11,0.4)', fontFamily: "'JetBrains Mono', monospace" }}>
+            {teamActivity.filter(a => teamActivityStatus(a) === 'active').length} ACTIVE
+          </span>
+        </div>
+        <TeamHeatmap teamActivity={teamActivity} onMemberClick={onMemberClick} />
+      </div>
+
+      {/* ── Comms Feed (bottom ~50%) ──── */}
+      <div style={{ flex: '5 1 0', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+        <div className="right-panel-divider" />
+        <div style={{
+          padding: '7px 14px 5px', flexShrink: 0,
+          borderBottom: '1px solid rgba(245,158,11,0.12)',
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        }}>
+          <span className="section-header">COMMUNICATIONS</span>
+          {slackLive && (
+            <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+              <span className="live-dot" style={{
+                display: 'inline-block', width: 6, height: 6, borderRadius: '50%',
+                background: '#22C55E', boxShadow: '0 0 6px #22C55E',
+                animation: 'livePulse 1.4s ease-in-out infinite',
+              }} />
+              <span style={{
+                fontSize: 7.5, color: '#22C55E', letterSpacing: '0.15em',
+                fontFamily: "'JetBrains Mono', monospace", fontWeight: 700,
+              }}>LIVE</span>
+            </span>
+          )}
+        </div>
+
+        <div style={{ flex: 1, overflowY: 'auto', padding: '4px 0' }}>
+          {allFeed.map((entry, i) => {
+            const isSlack = entry.source === 'slack';
+            const color = isSlack ? slackMsgColor({ isGabe: entry.person === 'Gabe', isBot: false, text: '', channel: '', time: '', timestamp: 0, person: entry.person }) : CYAN;
+            const preview = entry.text.length > 55 ? entry.text.slice(0, 55) + '…' : entry.text;
+            const badge = isSlack ? AMBER : CYAN;
+            return (
+              <div
+                key={`rf-${i}`}
+                className="activity-row slack-slide-in"
+                onClick={() => onFeedClick(entry)}
+                style={{
+                  padding: '5px 14px',
+                  borderLeft: `2px solid ${color}40`,
+                  marginBottom: 1,
+                  cursor: 'pointer',
+                  animationDelay: `${i * 0.04}s`,
+                }}
+                onMouseEnter={e => (e.currentTarget.style.background = 'rgba(245,158,11,0.04)')}
+                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+              >
+                <div style={{
+                  fontSize: 8, color: 'rgba(245,158,11,0.38)', marginBottom: 2,
+                  fontFamily: "'JetBrains Mono', monospace",
+                  display: 'flex', gap: 5, alignItems: 'center',
+                }}>
+                  <span>[{entry.time}]</span>
+                  <span style={{ color, fontWeight: 700 }}>{entry.person}</span>
+                  <span style={{
+                    color: badge, fontWeight: 700,
+                    background: `${badge}18`, padding: '0 4px', borderRadius: 3, fontSize: 7.5,
+                  }}>
+                    {isSlack ? 'SLK' : 'CC'}
+                  </span>
+                </div>
+                <div style={{
+                  fontSize: 9.5, color: 'rgba(245,158,11,0.82)',
+                  whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                  fontFamily: "'JetBrains Mono', monospace",
+                }}>
+                  {preview}
+                </div>
+              </div>
+            );
+          })}
+          {allFeed.length === 0 && (
+            <div style={{ padding: 16, textAlign: 'center', color: 'rgba(245,158,11,0.22)', fontSize: 9, fontFamily: "'JetBrains Mono', monospace" }}>
+              {slackLive ? 'NO RECENT MESSAGES…' : 'CONNECTING…'}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── Security strip at bottom ──── */}
+      {(activeThreats > 0 || gapStatuses.some(g => g.status !== 'clean')) && (
+        <div style={{ flexShrink: 0 }}>
+          <div className="right-panel-divider" />
+          <div style={{ padding: '4px 12px 6px', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 13 }}>🔒</span>
+            <div>
+              <div style={{
+                fontSize: 8.5, color: activeThreats > 0 ? RED : AMBER,
+                fontFamily: "'JetBrains Mono', monospace", fontWeight: 700,
+                textShadow: `0 0 5px ${activeThreats > 0 ? RED : AMBER}`,
+              }}>
+                {activeThreats > 0 ? `⚠ ${activeThreats} CRITICAL` : '! WARNINGS'}
+              </div>
+              <div style={{ fontSize: 8, color: 'rgba(245,158,11,0.4)', fontFamily: "'JetBrains Mono', monospace" }}>
+                {gapStatuses.filter(g => g.status !== 'clean').length} FLAGS · {auditTime}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─── 12h Timeline ───────────────────────────────────────────── */
+interface TimelineProps {
+  feedEntries: CCEntry[];
+  bottomOffset: number;
+}
+
+function Timeline({ feedEntries, bottomOffset }: TimelineProps) {
+  const [hoveredDot, setHoveredDot] = useState<{ entry: CCEntry; x: number; y: number } | null>(null);
+
+  const now = Date.now();
+  const twelveHoursAgo = now - 12 * 60 * 60 * 1000;
+
+  // Filter entries in the 12h window
+  const timelineEntries = feedEntries.filter(e => e.timestamp >= twelveHoursAgo);
+
+  // Find team member color for a person name
+  function getPersonColor(personName: string): string {
+    const nameLower = personName.toLowerCase();
+    const member = TEAM_MEMBERS.find(m =>
+      m.slackNames?.some(n => nameLower.includes(n)) || nameLower.includes(m.shortName.toLowerCase())
+    );
+    return member?.color || AMBER;
+  }
+
+  // Group entries by time proximity to determine size
+  function getDotSize(entry: CCEntry): 'sm' | 'md' | 'lg' {
+    const nearCount = timelineEntries.filter(e =>
+      Math.abs(e.timestamp - entry.timestamp) < 10 * 60 * 1000 // within 10 min
+    ).length;
+    if (nearCount >= 5) return 'lg';
+    if (nearCount >= 2) return 'md';
+    return 'sm';
+  }
+
+  // Generate 2h labels
+  const labels: Array<{ label: string; pct: number }> = [];
+  for (let h = 12; h >= 0; h -= 2) {
+    const ts = now - h * 60 * 60 * 1000;
+    const pct = ((ts - twelveHoursAgo) / (12 * 60 * 60 * 1000)) * 100;
+    const d = new Date(ts);
+    const label = d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+    labels.push({ label, pct });
+  }
+
+  return (
+    <div style={{
+      position: 'absolute',
+      left: 0, right: 0,
+      bottom: bottomOffset + 52,
+      height: 44,
+      zIndex: 12,
+      background: 'rgba(14,6,0,0.75)',
+      borderTop: '1px solid rgba(245,158,11,0.15)',
+      borderBottom: '1px solid rgba(245,158,11,0.1)',
+      backdropFilter: 'blur(8px)',
+      overflow: 'visible',
+    }}>
+      {/* Time axis labels */}
+      <div style={{ position: 'relative', height: '100%', padding: '0 14px' }}>
+        {labels.map(({ label, pct }) => (
+          <div key={label} style={{
+            position: 'absolute',
+            bottom: 3,
+            left: `calc(${pct}% + 14px)`,
+            transform: 'translateX(-50%)',
+            fontSize: 7,
+            color: 'rgba(245,158,11,0.3)',
+            fontFamily: "'JetBrains Mono', monospace",
+            whiteSpace: 'nowrap',
+            pointerEvents: 'none',
+          }}>
+            {label}
+          </div>
+        ))}
+
+        {/* Vertical grid lines */}
+        {labels.map(({ label, pct }) => (
+          <div key={`line-${label}`} style={{
+            position: 'absolute',
+            top: 0,
+            bottom: 14,
+            left: `calc(${pct}% + 14px)`,
+            width: 1,
+            background: 'rgba(245,158,11,0.08)',
+            pointerEvents: 'none',
+          }} />
+        ))}
+
+        {/* Interaction dots */}
+        {timelineEntries.map((entry, i) => {
+          const pct = ((entry.timestamp - twelveHoursAgo) / (12 * 60 * 60 * 1000)) * 100;
+          if (pct < 0 || pct > 100) return null;
+          const color = getPersonColor(entry.person);
+          const size = getDotSize(entry);
+          const dotSize = size === 'lg' ? 9 : size === 'md' ? 7 : 5;
+          return (
+            <div
+              key={`dot-${i}`}
+              onMouseEnter={e => setHoveredDot({ entry, x: e.clientX, y: e.clientY })}
+              onMouseLeave={() => setHoveredDot(null)}
+              style={{
+                position: 'absolute',
+                top: '50%',
+                left: `calc(${pct}% + 14px)`,
+                transform: `translate(-50%, -${55 + (i % 3) * 5}%)`,
+                width: dotSize,
+                height: dotSize,
+                borderRadius: '50%',
+                background: color,
+                boxShadow: `0 0 ${dotSize}px ${color}`,
+                cursor: 'pointer',
+                zIndex: 2,
+                transition: 'transform 0.15s',
+              }}
+              onMouseOver={e => { e.currentTarget.style.transform = `translate(-50%, -60%) scale(1.5)`; }}
+              onMouseOut={e => { e.currentTarget.style.transform = `translate(-50%, -${55 + (i % 3) * 5}%)`; }}
+            />
+          );
+        })}
+
+        {/* NOW indicator */}
+        <div style={{
+          position: 'absolute',
+          top: 0, bottom: 14,
+          right: 14,
+          width: 1,
+          background: AMBER,
+          boxShadow: `0 0 4px ${AMBER}`,
+        }} />
+        <div style={{
+          position: 'absolute',
+          bottom: 3,
+          right: 14,
+          transform: 'translateX(50%)',
+          fontSize: 7,
+          color: AMBER,
+          fontFamily: "'JetBrains Mono', monospace",
+          fontWeight: 700,
+        }}>
+          NOW
+        </div>
+      </div>
+
+      {/* Hover tooltip */}
+      {hoveredDot && (
+        <div style={{
+          position: 'fixed',
+          left: hoveredDot.x + 10,
+          top: hoveredDot.y - 60,
+          background: 'rgba(14,6,0,0.97)',
+          border: `1px solid ${AMBER}`,
+          borderRadius: 4,
+          padding: '6px 10px',
+          zIndex: 1000,
+          pointerEvents: 'none',
+          fontFamily: "'JetBrains Mono', monospace",
+        }}>
+          <div style={{ fontSize: 8, color: AMBER, fontWeight: 700 }}>{hoveredDot.entry.person}</div>
+          <div style={{ fontSize: 7.5, color: 'rgba(245,158,11,0.6)', marginTop: 2 }}>{hoveredDot.entry.time}</div>
+          <div style={{
+            fontSize: 8, color: 'rgba(245,158,11,0.8)', marginTop: 3,
+            maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          }}>
+            {hoveredDot.entry.text.slice(0, 60)}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -781,7 +1165,6 @@ function BottomStrip({ status, now }: BottomStripProps) {
       display: 'flex', alignItems: 'stretch',
       backdropFilter: 'blur(10px)',
     }}>
-      {/* Left: metrics ticker */}
       <div style={{ flex: 1, overflow: 'hidden', display: 'flex', alignItems: 'center', minWidth: 0 }}>
         <div className="ticker-track" style={{
           fontSize: 9,
@@ -795,7 +1178,6 @@ function BottomStrip({ status, now }: BottomStripProps) {
         </div>
       </div>
 
-      {/* Center: military clock */}
       <div style={{
         flexShrink: 0,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -812,7 +1194,6 @@ function BottomStrip({ status, now }: BottomStripProps) {
         </span>
       </div>
 
-      {/* Right: BI freshness cards */}
       <div style={{
         flexShrink: 0,
         display: 'flex', flexDirection: 'column', justifyContent: 'center',
@@ -870,7 +1251,6 @@ function AlertBar({ errorCount, errorJobs, security }: AlertBarProps) {
   const secFlags = security ? security.gapStatuses.filter(g => g.status !== 'clean').length : 0;
   const hasCronErrors  = errorCount > 0;
   const hasSecFlags    = secFlags > 0;
-
   if (!hasCronErrors && !hasSecFlags) return null;
 
   const cronNames = errorJobs.map(j => j.name).join('  ●  ');
@@ -886,7 +1266,6 @@ function AlertBar({ errorCount, errorJobs, security }: AlertBarProps) {
         display: 'flex', alignItems: 'center',
       }}
     >
-      {/* Left: cron errors scrolling */}
       {hasCronErrors && (
         <div style={{
           flex: 1, overflow: 'hidden', display: 'flex', alignItems: 'center',
@@ -905,8 +1284,6 @@ function AlertBar({ errorCount, errorJobs, security }: AlertBarProps) {
           </div>
         </div>
       )}
-
-      {/* Right: security flags */}
       {hasSecFlags && (
         <div style={{
           flexShrink: 0, display: 'flex', alignItems: 'center', gap: 8,
@@ -917,13 +1294,255 @@ function AlertBar({ errorCount, errorJobs, security }: AlertBarProps) {
           <span style={{
             fontSize: 9.5, color: RED, letterSpacing: '0.12em',
             textShadow: `0 0 8px ${RED}`,
-            fontFamily: "'JetBrains Mono', monospace",
-            fontWeight: 700,
+            fontFamily: "'JetBrains Mono', monospace", fontWeight: 700,
           }}>
             {secFlags} SECURITY FLAG{secFlags > 1 ? 'S' : ''}
           </span>
         </div>
       )}
+    </div>
+  );
+}
+
+/* ─── Detail Drawer ───────────────────────────────────────────── */
+interface DrawerProps {
+  content: DrawerContent | null;
+  onClose: () => void;
+}
+
+function DetailDrawer({ content, onClose }: DrawerProps) {
+  if (!content) return null;
+
+  return (
+    <>
+      {/* Backdrop */}
+      <div
+        onClick={onClose}
+        style={{
+          position: 'fixed', inset: 0, zIndex: 40,
+          background: 'rgba(0,0,0,0.4)',
+          backdropFilter: 'blur(2px)',
+        }}
+      />
+      {/* Drawer */}
+      <div style={{
+        position: 'fixed', top: 0, right: 0, bottom: 0,
+        width: 380, zIndex: 41,
+        background: 'rgba(10,5,0,0.97)',
+        borderLeft: '1px solid rgba(245,158,11,0.3)',
+        boxShadow: '-20px 0 60px rgba(245,158,11,0.08)',
+        display: 'flex', flexDirection: 'column',
+        animation: 'drawer-slide-in 0.25s ease-out',
+        fontFamily: "'JetBrains Mono', monospace",
+      }}>
+        {/* Shimmer */}
+        <div style={{
+          height: 1, background: 'linear-gradient(90deg, transparent, rgba(245,158,11,0.6), transparent)',
+        }} />
+
+        {/* Header */}
+        <div style={{
+          padding: '16px 20px',
+          borderBottom: '1px solid rgba(245,158,11,0.15)',
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        }}>
+          <div>
+            <div style={{ fontSize: 8, color: 'rgba(245,158,11,0.4)', letterSpacing: '0.2em', marginBottom: 4 }}>
+              {content.type.toUpperCase()} DETAIL
+            </div>
+            <div style={{ fontSize: 12, color: AMBER, fontWeight: 700 }}>
+              {content.title}
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            style={{
+              background: 'none', border: '1px solid rgba(245,158,11,0.3)',
+              color: AMBER, cursor: 'pointer', padding: '4px 10px',
+              borderRadius: 3, fontSize: 12,
+              fontFamily: "'JetBrains Mono', monospace",
+            }}
+          >
+            ✕
+          </button>
+        </div>
+
+        {/* Content */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: 20 }}>
+          {content.type === 'cron' && <CronDetail data={content.data as CronJob} />}
+          {content.type === 'team' && <TeamDetail data={content.data as { member: TeamMember; activity: TeamActivity }} />}
+          {content.type === 'feed' && <FeedDetail data={content.data as CCEntry} />}
+        </div>
+      </div>
+
+      <style>{`
+        @keyframes drawer-slide-in {
+          from { transform: translateX(100%); opacity: 0; }
+          to   { transform: translateX(0);    opacity: 1; }
+        }
+      `}</style>
+    </>
+  );
+}
+
+function CronDetail({ data }: { data: CronJob }) {
+  const sc = STATUS_COLORS[data.lastStatus || 'unknown'] ?? GRAY;
+  const displayTime = data.lastRunAgo && data.lastRunAgo !== '-' ? data.lastRunAgo : timeAgo(data.lastRun);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {/* Status badge */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 10,
+        padding: '10px 14px',
+        background: `rgba(${sc === GREEN ? '34,197,94' : sc === RED ? '239,68,68' : '107,114,128'},0.1)`,
+        border: `1px solid ${sc}30`,
+        borderRadius: 6,
+      }}>
+        <div className={`dot dot-${data.lastStatus || 'unknown'}`} />
+        <span style={{ color: sc, fontSize: 13, fontWeight: 700 }}>
+          {(data.lastStatus || 'unknown').toUpperCase()}
+        </span>
+      </div>
+
+      {/* Details grid */}
+      {[
+        ['Category', data.category || '—'],
+        ['Schedule', data.schedule || '—'],
+        ['Last Run', displayTime],
+        ['Next Run', data.nextRun || '—'],
+        ['Model', data.model || '—'],
+        ['ID', (data.id || '—').slice(0, 20)],
+      ].map(([label, value]) => (
+        <div key={label}>
+          <div style={{ fontSize: 8, color: 'rgba(245,158,11,0.4)', letterSpacing: '0.15em', marginBottom: 4 }}>
+            {label}
+          </div>
+          <div style={{ fontSize: 11, color: 'rgba(245,158,11,0.85)', lineHeight: 1.5 }}>
+            {value}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function TeamDetail({ data }: { data: { member: TeamMember; activity: TeamActivity } }) {
+  const { member, activity } = data;
+  const status = teamActivityStatus(activity);
+  const dotColor = status === 'active' ? GREEN : status === 'recent' ? AMBER : GRAY;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {/* Avatar / name */}
+      <div style={{ textAlign: 'center', padding: '20px 0' }}>
+        <div style={{
+          width: 64, height: 64, borderRadius: '50%',
+          background: `rgba(${hexToRgb(member.color)},0.15)`,
+          border: `2px solid ${member.color}60`,
+          margin: '0 auto 12px',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          fontSize: 24, color: member.color,
+          boxShadow: status === 'active' ? `0 0 20px ${member.color}40` : 'none',
+        }}>
+          {member.shortName[0]}
+        </div>
+        <div style={{ fontSize: 14, color: member.color, fontWeight: 700 }}>{member.name}</div>
+        <div style={{ fontSize: 10, color: 'rgba(245,158,11,0.5)', marginTop: 4 }}>{member.role}</div>
+      </div>
+
+      {/* Status */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '10px 14px',
+        background: `rgba(${dotColor === GREEN ? '34,197,94' : dotColor === AMBER ? '245,158,11' : '107,114,128'},0.08)`,
+        border: `1px solid ${dotColor}30`,
+        borderRadius: 6,
+      }}>
+        <div style={{
+          width: 8, height: 8, borderRadius: '50%',
+          background: dotColor, boxShadow: `0 0 6px ${dotColor}`,
+        }} />
+        <span style={{ color: dotColor, fontSize: 11, fontWeight: 700 }}>
+          {status.toUpperCase()}
+        </span>
+        {activity.lastSeenAt && (
+          <span style={{ color: 'rgba(245,158,11,0.4)', fontSize: 10 }}>
+            · {timeAgo(new Date(activity.lastSeenAt).toISOString())}
+          </span>
+        )}
+      </div>
+
+      {/* Activity source */}
+      {[
+        ['Activity Source', activity.source ? activity.source.toUpperCase() : 'NO RECENT ACTIVITY'],
+        ['Last Seen', activity.lastSeenAt ? formatTime(new Date(activity.lastSeenAt).toISOString()) : '—'],
+      ].map(([label, value]) => (
+        <div key={label}>
+          <div style={{ fontSize: 8, color: 'rgba(245,158,11,0.4)', letterSpacing: '0.15em', marginBottom: 4 }}>
+            {label}
+          </div>
+          <div style={{ fontSize: 11, color: 'rgba(245,158,11,0.85)' }}>{value}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function FeedDetail({ data }: { data: CCEntry }) {
+  const isSlack = data.source === 'slack';
+  const color = isSlack ? AMBER : CYAN;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {/* Source badge */}
+      <div style={{
+        display: 'inline-flex', alignItems: 'center', gap: 6,
+        padding: '6px 12px',
+        background: `${color}15`,
+        border: `1px solid ${color}40`,
+        borderRadius: 4,
+        alignSelf: 'flex-start',
+      }}>
+        <span style={{ color, fontSize: 9, fontWeight: 700, letterSpacing: '0.15em' }}>
+          {isSlack ? '◈ SLACK' : '◈ COMMAND CENTER'}
+        </span>
+      </div>
+
+      {[
+        ['From', data.person],
+        ['Time', data.time],
+        ...(data.agent_name ? [['Agent', data.agent_name]] : []),
+        ...(data.action_type ? [['Action', data.action_type]] : []),
+        ...(data.client_tag ? [['Client', data.client_tag]] : []),
+        ...(data.status ? [['Status', data.status.toUpperCase()]] : []),
+      ].map(([label, value]) => (
+        <div key={label}>
+          <div style={{ fontSize: 8, color: 'rgba(245,158,11,0.4)', letterSpacing: '0.15em', marginBottom: 4 }}>
+            {label}
+          </div>
+          <div style={{ fontSize: 11, color: 'rgba(245,158,11,0.85)' }}>{value}</div>
+        </div>
+      ))}
+
+      {/* Full message */}
+      <div>
+        <div style={{ fontSize: 8, color: 'rgba(245,158,11,0.4)', letterSpacing: '0.15em', marginBottom: 8 }}>
+          FULL MESSAGE
+        </div>
+        <div style={{
+          padding: '12px 14px',
+          background: 'rgba(0,0,0,0.3)',
+          border: '1px solid rgba(245,158,11,0.1)',
+          borderRadius: 4,
+          fontSize: 11, color: 'rgba(245,158,11,0.85)',
+          lineHeight: 1.6,
+          whiteSpace: 'pre-wrap',
+          wordBreak: 'break-word',
+        }}>
+          {data.text}
+        </div>
+      </div>
     </div>
   );
 }
@@ -935,11 +1554,16 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
   const particlesRef = useRef<Particle[]>([]);
   const animRef      = useRef<number>(0);
   const tRef         = useRef(0);
+  const voiceStateRef = useRef<VoiceState>('idle');
 
   const [status, setStatus]           = useState<StatusResponse | null>(null);
   const [now, setNow]                  = useState<Date>(new Date());
   const [slackMessages, setSlackMsgs] = useState<SlackMessage[]>([]);
   const [slackLive, setSlackLive]     = useState(false);
+  const [ccEntries, setCcEntries]     = useState<CCEntry[]>([]);
+  const [voiceState, setVoiceState]   = useState<VoiceState>('idle');
+  const [drawer, setDrawer]           = useState<DrawerContent | null>(null);
+  const [tooltip, setTooltip]         = useState<{ x: number; y: number; job: CronJob } | null>(null);
 
   /* Clock */
   useEffect(() => {
@@ -963,7 +1587,7 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
     return () => clearInterval(id);
   }, [fetchStatus]);
 
-  /* Slack live feed — 15s poll */
+  /* Slack live feed */
   const fetchSlack = useCallback(async () => {
     try {
       const res  = await fetch('/api/slack', { cache: 'no-store' });
@@ -980,6 +1604,46 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
     const id = setInterval(fetchSlack, 15_000);
     return () => clearInterval(id);
   }, [fetchSlack]);
+
+  /* CC activity feed */
+  const fetchCC = useCallback(async () => {
+    const CC_URL = process.env.NEXT_PUBLIC_CC_API_URL || 'https://eb-command-center.vercel.app';
+    try {
+      const res = await fetch(`${CC_URL}/api/admin/activity-feed?hours=4&limit=15`, {
+        cache: 'no-store',
+        signal: AbortSignal.timeout(8000),
+      });
+      const data = await res.json() as {
+        entries?: Array<{
+          id: number;
+          agent_name: string;
+          action_type: string;
+          client_tag: string | null;
+          input_summary: string;
+          output_summary: string;
+          status: string;
+          created_at: string;
+        }>;
+      };
+      if (Array.isArray(data.entries)) {
+        const entries: CCEntry[] = data.entries.map(e => ({
+          ...e,
+          source: 'cc' as const,
+          text: e.output_summary || e.input_summary || e.action_type,
+          person: e.agent_name,
+          time: formatTime(e.created_at),
+          timestamp: new Date(e.created_at).getTime(),
+        }));
+        setCcEntries(entries);
+      }
+    } catch { /* CC may be unavailable */ }
+  }, []);
+
+  useEffect(() => {
+    fetchCC();
+    const id = setInterval(fetchCC, 30_000);
+    return () => clearInterval(id);
+  }, [fetchCC]);
 
   /* Render loop */
   useEffect(() => {
@@ -1014,9 +1678,9 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
 
       drawGrid(ctx, w, h);
       drawOrb(ctx, cx, cy, minDim, t,
-        s?.crons ?? [], s?.gateway.healthy ?? false, s?.sessions.active ?? 0);
+        s?.crons ?? [], s?.gateway.healthy ?? false, s?.sessions.active ?? 0,
+        voiceStateRef.current);
 
-      // Particles
       if (s && Math.random() < 0.06 && particlesRef.current.length < 80) {
         particlesRef.current.push(spawnParticle(cx, cy, hasErrors));
       }
@@ -1029,9 +1693,7 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
     return () => cancelAnimationFrame(animRef.current);
   }, [transparent]);
 
-  /* Tooltip */
-  const [tooltip, setTooltip] = useState<{ x: number; y: number; job: CronJob } | null>(null);
-
+  /* Tooltip on canvas */
   const handleMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
     if (!canvas || !statusRef.current) { setTooltip(null); return; }
@@ -1064,11 +1726,44 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
   const totalCrons  = status?.crons.length ?? 0;
   const errorCount  = status?.errors ?? 0;
   const errorJobs   = status?.crons.filter(c => c.lastStatus === 'error') ?? [];
-  const comms       = status?.recentComms ?? [];
-  void comms; // kept for type compatibility; live feed is preferred
   const security    = status?.security ?? null;
   const hasAlert    = errorCount > 0 || (security?.gapStatuses.some(g => g.status !== 'clean') ?? false);
   const topOffset   = hasAlert ? 50 : 8;
+
+  // Combined feed for left panel (interleaved Slack + CC)
+  const combinedFeed: CCEntry[] = [
+    ...slackMessages.map((msg): CCEntry => ({
+      id: msg.timestamp,
+      source: 'slack',
+      text: msg.text,
+      person: msg.person,
+      time: msg.time,
+      timestamp: msg.timestamp * 1000,
+      created_at: new Date(msg.timestamp * 1000).toISOString(),
+    })),
+    ...ccEntries,
+  ].sort((a, b) => b.timestamp - a.timestamp).slice(0, 20);
+
+  // Team activity
+  const teamActivity = buildTeamActivity(slackMessages, combinedFeed);
+
+  // Drawer handlers
+  const openCronDrawer = useCallback((job: CronJob) => {
+    setDrawer({ type: 'cron', title: job.name, data: job });
+  }, []);
+
+  const openTeamDrawer = useCallback((member: TeamMember, activity: TeamActivity) => {
+    setDrawer({ type: 'team', title: member.name, data: { member, activity } });
+  }, []);
+
+  const openFeedDrawer = useCallback((entry: CCEntry) => {
+    setDrawer({ type: 'feed', title: `${entry.person} · ${entry.time}`, data: entry });
+  }, []);
+
+  const handleVoiceStateChange = useCallback((s: VoiceState) => {
+    voiceStateRef.current = s;
+    setVoiceState(s);
+  }, []);
 
   return (
     <div
@@ -1079,7 +1774,7 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
         background: transparent ? 'transparent' : BG,
       }}
     >
-      {/* Canvas — full screen, center orb + particles */}
+      {/* Canvas */}
       <canvas
         ref={canvasRef}
         onMouseMove={handleMouseMove}
@@ -1087,39 +1782,60 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
         style={{ position: 'absolute', inset: 0, zIndex: 1, display: 'block' }}
       />
 
-      {/* Alert bar */}
-      <AlertBar
-        errorCount={errorCount}
-        errorJobs={errorJobs}
-        security={security}
-      />
+      {/* Voice Interface (orb click handler + overlay) */}
+      <div style={{ position: 'absolute', inset: 0, zIndex: 5, pointerEvents: 'none' }}>
+        <div style={{ pointerEvents: 'auto' }}>
+          <VoiceInterface
+            onStateChange={handleVoiceStateChange}
+            cronContext={{
+              ok: status?.crons.filter(c => c.lastStatus === 'ok').length ?? 0,
+              error: errorCount,
+              total: totalCrons,
+            }}
+            errorContext={errorJobs.map(j => j.name)}
+          />
+        </div>
+      </div>
 
-      {/* Left panel — all crons */}
+      {/* Alert bar */}
+      <AlertBar errorCount={errorCount} errorJobs={errorJobs} security={security} />
+
+      {/* Left panel */}
       <LeftPanel
         cronGroups={cronGroups}
         totalCrons={totalCrons}
         errorCount={errorCount}
         topOffset={topOffset}
+        feedEntries={combinedFeed}
+        onCronClick={openCronDrawer}
+        onFeedClick={openFeedDrawer}
       />
 
-      {/* Right panel — comms + security */}
+      {/* Right panel */}
       <RightPanel
-        comms={comms}
         slackMessages={slackMessages}
         slackLive={slackLive}
-        security={security ?? {
-          gapStatuses: [],
-          activeThreats: 0,
-          lastAudit: '',
-          highItems: [],
-        }}
+        security={security ?? { gapStatuses: [], activeThreats: 0, lastAudit: '', highItems: [] }}
         topOffset={topOffset}
+        teamActivity={teamActivity}
+        ccEntries={combinedFeed}
+        onMemberClick={openTeamDrawer}
+        onFeedClick={openFeedDrawer}
+      />
+
+      {/* 12h Timeline */}
+      <Timeline
+        feedEntries={combinedFeed}
+        bottomOffset={0}
       />
 
       {/* Bottom HUD */}
       <BottomStrip status={status} now={now} />
 
-      {/* Hover tooltip */}
+      {/* Detail Drawer */}
+      <DetailDrawer content={drawer} onClose={() => setDrawer(null)} />
+
+      {/* Canvas hover tooltip */}
       {tooltip && (() => {
         const sc = STATUS_COLORS[tooltip.job.lastStatus || 'unknown'] ?? GRAY;
         const displayTime = tooltip.job.lastRunAgo && tooltip.job.lastRunAgo !== '-'
@@ -1142,10 +1858,7 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
             minWidth: 200,
             boxShadow: `0 0 20px rgba(245,158,11,0.18)`,
           }}>
-            <div style={{
-              fontWeight: 700, marginBottom: 5, color: sc,
-              textShadow: `0 0 8px ${sc}`,
-            }}>
+            <div style={{ fontWeight: 700, marginBottom: 5, color: sc, textShadow: `0 0 8px ${sc}` }}>
               {tooltip.job.name}
             </div>
             <div style={{ color: 'rgba(245,158,11,0.5)', fontSize: 9.5, lineHeight: 1.7 }}>
@@ -1160,6 +1873,31 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
           </div>
         );
       })()}
+
+      {/* Voice state HUD indicator */}
+      {voiceState !== 'idle' && (
+        <div style={{
+          position: 'absolute',
+          top: topOffset + 8,
+          left: '50%',
+          transform: 'translateX(-50%)',
+          zIndex: 20,
+          background: 'rgba(14,6,0,0.9)',
+          border: `1px solid ${AMBER}`,
+          borderRadius: 20,
+          padding: '4px 16px',
+          fontSize: 9,
+          color: AMBER,
+          fontFamily: "'JetBrains Mono', monospace",
+          letterSpacing: '0.2em',
+          textShadow: `0 0 8px ${AMBER}`,
+          pointerEvents: 'none',
+        }}>
+          {voiceState === 'listening' && '◉ LISTENING'}
+          {voiceState === 'processing' && '◈ PROCESSING'}
+          {voiceState === 'speaking' && '◆ SPEAKING'}
+        </div>
+      )}
     </div>
   );
 }
