@@ -314,3 +314,19 @@ html, body {
   background: linear-gradient(90deg, transparent 0%, rgba(245,158,11,0.3) 50%, transparent 100%);
   flex-shrink: 0;
 }
+
+/* ── LIVE dot pulse animation ────────────────────────────────── */
+@keyframes livePulse {
+  0%, 100% { opacity: 1;   box-shadow: 0 0 6px #22C55E; }
+  50%       { opacity: 0.4; box-shadow: 0 0 2px #22C55E; }
+}
+
+/* ── Slack message slide-in from top ─────────────────────────── */
+@keyframes slideInTop {
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.slack-slide-in {
+  animation: slideInTop 0.28s ease-out both;
+}

@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useCallback, useState } from 'react';
 import type { CronJob, CommEntry, SecurityData, StatusResponse } from '../api/status/route';
+import type { SlackMessage } from '../api/slack/route';
 
 /* ─── Constants ──────────────────────────────────────────────── */
 const AMBER   = '#F59E0B';
@@ -540,63 +541,103 @@ function LeftPanel({ cronGroups, totalCrons, errorCount, topOffset }: LeftPanelP
   );
 }
 
-/* ─── Right Panel: Comms ──────────────────────────────────────── */
+/* ─── Right Panel: Comms (LIVE SLACK) ───────────────────────── */
 interface CommsPanelProps {
-  comms: CommEntry[];
+  messages: SlackMessage[];
+  live: boolean;
 }
 
-function CommsSection({ comms }: CommsPanelProps) {
-  const personColor = (type: CommEntry['type']) => {
-    if (type === 'gabe')   return GOLD;
-    if (type === 'team')   return '#6EE7B7';
-    return '#9CA3AF';
-  };
+function slackMsgColor(msg: SlackMessage): string {
+  if (msg.isGabe)  return '#FCD34D';   // warm gold
+  if (msg.isBot)   return '#F59E0B';   // amber (Jarvis / other bots)
+  return '#2DD4BF';                    // teal (team members)
+}
 
+function channelBadgeColor(channel: string): string {
+  if (channel === 'DM')        return '#FCD34D';
+  if (channel === '#activity') return '#F59E0B';
+  if (channel === '#feedback') return '#A78BFA';
+  return '#6EE7B7'; // #internal
+}
+
+function CommsSection({ messages, live }: CommsPanelProps) {
   return (
     <div style={{ flex: '3 1 0', overflowY: 'auto', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-      {/* Section header */}
+      {/* Section header with LIVE dot */}
       <div style={{
         padding: '7px 14px 5px', flexShrink: 0,
         borderBottom: '1px solid rgba(245,158,11,0.12)',
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
       }}>
         <span className="section-header">COMMUNICATIONS</span>
+        {live && (
+          <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+            <span
+              className="live-dot"
+              style={{
+                display: 'inline-block', width: 6, height: 6, borderRadius: '50%',
+                background: '#22C55E', boxShadow: '0 0 6px #22C55E',
+                animation: 'livePulse 1.4s ease-in-out infinite',
+              }}
+            />
+            <span style={{
+              fontSize: 7.5, color: '#22C55E', letterSpacing: '0.15em',
+              fontFamily: "'JetBrains Mono', monospace", fontWeight: 700,
+            }}>LIVE</span>
+          </span>
+        )}
       </div>
 
       <div style={{ flex: 1, overflowY: 'auto', padding: '4px 0' }}>
-        {comms.map((entry, i) => (
-          <div
-            key={i}
-            className="activity-row"
-            style={{
-              padding: '5px 14px',
-              borderLeft: `2px solid ${personColor(entry.type)}40`,
-              marginBottom: 1,
-              animationDelay: `${i * 0.06}s`,
-            }}
-          >
-            <div style={{
-              fontSize: 8, color: 'rgba(245,158,11,0.38)', marginBottom: 2,
-              fontFamily: "'JetBrains Mono', monospace",
-              display: 'flex', gap: 6,
-            }}>
-              <span>{entry.time}</span>
-              <span style={{ color: personColor(entry.type), fontWeight: 600 }}>
-                {entry.person}
-              </span>
+        {messages.map((msg, i) => {
+          const color  = slackMsgColor(msg);
+          const badge  = channelBadgeColor(msg.channel);
+          const preview = msg.text.length > 60 ? msg.text.slice(0, 60) + '…' : msg.text;
+          return (
+            <div
+              key={`${msg.timestamp}-${i}`}
+              className="activity-row slack-slide-in"
+              style={{
+                padding: '5px 14px',
+                borderLeft: `2px solid ${color}40`,
+                marginBottom: 1,
+                animationDelay: `${i * 0.04}s`,
+              }}
+            >
+              {/* Top row: time · person → channel badge */}
+              <div style={{
+                fontSize: 8, color: 'rgba(245,158,11,0.38)', marginBottom: 2,
+                fontFamily: "'JetBrains Mono', monospace",
+                display: 'flex', gap: 5, alignItems: 'center',
+              }}>
+                <span>[{msg.time}]</span>
+                <span style={{ color, fontWeight: 700 }}>{msg.person}</span>
+                <span style={{ color: 'rgba(245,158,11,0.3)' }}>→</span>
+                <span style={{
+                  color: badge, fontWeight: 700,
+                  background: `${badge}18`,
+                  padding: '0 4px', borderRadius: 3,
+                  fontSize: 7.5,
+                }}
+                >
+                  {msg.channel}
+                </span>
+              </div>
+              {/* Message preview */}
+              <div style={{
+                fontSize: 9.5, color: 'rgba(245,158,11,0.82)',
+                whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                fontFamily: "'JetBrains Mono', monospace",
+              }}>
+                {preview}
+              </div>
             </div>
-            <div style={{
-              fontSize: 9.5, color: 'rgba(245,158,11,0.82)',
-              whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-              fontFamily: "'JetBrains Mono', monospace",
-            }}>
-              {entry.action}
-            </div>
-          </div>
-        ))}
-        {comms.length === 0 && (
+          );
+        })}
+        {messages.length === 0 && (
           <div style={{ padding: 16, textAlign: 'center', color: 'rgba(245,158,11,0.22)', fontSize: 9,
             fontFamily: "'JetBrains Mono', monospace" }}>
-            MONITORING…
+            {live ? 'NO RECENT MESSAGES…' : 'CONNECTING TO SLACK…'}
           </div>
         )}
       </div>
@@ -693,11 +734,13 @@ function SecuritySection({ security }: SecuritySectionProps) {
 /* ─── Right Panel (wrapper) ──────────────────────────────────── */
 interface RightPanelProps {
   comms: CommEntry[];
+  slackMessages: SlackMessage[];
+  slackLive: boolean;
   security: SecurityData;
   topOffset: number;
 }
 
-function RightPanel({ comms, security, topOffset }: RightPanelProps) {
+function RightPanel({ slackMessages, slackLive, security, topOffset }: RightPanelProps) {
   return (
     <div
       className="hud-panel panel-right"
@@ -708,7 +751,7 @@ function RightPanel({ comms, security, topOffset }: RightPanelProps) {
     >
       <div className="panel-shimmer" />
       <div className="scan-line" style={{ animationDelay: '-2.1s' }} />
-      <CommsSection comms={comms} />
+      <CommsSection messages={slackMessages} live={slackLive} />
       <SecuritySection security={security} />
     </div>
   );
@@ -893,8 +936,10 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
   const animRef      = useRef<number>(0);
   const tRef         = useRef(0);
 
-  const [status, setStatus] = useState<StatusResponse | null>(null);
-  const [now, setNow]       = useState<Date>(new Date());
+  const [status, setStatus]           = useState<StatusResponse | null>(null);
+  const [now, setNow]                  = useState<Date>(new Date());
+  const [slackMessages, setSlackMsgs] = useState<SlackMessage[]>([]);
+  const [slackLive, setSlackLive]     = useState(false);
 
   /* Clock */
   useEffect(() => {
@@ -917,6 +962,24 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
     const id = setInterval(fetchStatus, 10_000);
     return () => clearInterval(id);
   }, [fetchStatus]);
+
+  /* Slack live feed — 15s poll */
+  const fetchSlack = useCallback(async () => {
+    try {
+      const res  = await fetch('/api/slack', { cache: 'no-store' });
+      const data = await res.json() as { messages: SlackMessage[] };
+      if (Array.isArray(data.messages)) {
+        setSlackMsgs(data.messages);
+        setSlackLive(true);
+      }
+    } catch { /* keep stale */ }
+  }, []);
+
+  useEffect(() => {
+    fetchSlack();
+    const id = setInterval(fetchSlack, 15_000);
+    return () => clearInterval(id);
+  }, [fetchSlack]);
 
   /* Render loop */
   useEffect(() => {
@@ -1002,6 +1065,7 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
   const errorCount  = status?.errors ?? 0;
   const errorJobs   = status?.crons.filter(c => c.lastStatus === 'error') ?? [];
   const comms       = status?.recentComms ?? [];
+  void comms; // kept for type compatibility; live feed is preferred
   const security    = status?.security ?? null;
   const hasAlert    = errorCount > 0 || (security?.gapStatuses.some(g => g.status !== 'clean') ?? false);
   const topOffset   = hasAlert ? 50 : 8;
@@ -1041,6 +1105,8 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
       {/* Right panel — comms + security */}
       <RightPanel
         comms={comms}
+        slackMessages={slackMessages}
+        slackLive={slackLive}
         security={security ?? {
           gapStatuses: [],
           activeThreats: 0,
