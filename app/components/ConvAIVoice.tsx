@@ -34,6 +34,7 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
   const playCtxRef = useRef<AudioContext | null>(null);
   const nextPlayTimeRef = useRef(0);
   const chunksSentRef = useRef(0);
+  const isSpeakingRef = useRef(false);
 
   const updateState = useCallback((s: ConvState) => {
     setState(s);
@@ -157,6 +158,8 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
 
           processor.onaudioprocess = (e) => {
             if (ws.readyState !== WebSocket.OPEN) return;
+            // MUTE mic while agent is speaking to prevent self-listening feedback
+            if (isSpeakingRef.current) return;
             const raw = e.inputBuffer.getChannelData(0);
             const down = downsample(raw, nativeRate, 16000);
             const pcm = float32ToPCM16(down);
@@ -209,13 +212,30 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
           if (msg.type === 'audio') {
             const b64 = msg.audio_event?.audio_base_64;
             if (b64) {
+              isSpeakingRef.current = true;
               updateState('speaking');
               playAudioBase64(b64);
+              // Schedule mic unmute after this chunk finishes playing
+              const playEnd = nextPlayTimeRef.current;
+              const ctx = playCtxRef.current;
+              if (ctx) {
+                const waitMs = Math.max(0, (playEnd - ctx.currentTime) * 1000) + 200; // 200ms buffer
+                setTimeout(() => {
+                  // Only unmute if no newer audio has been scheduled
+                  if (ctx && ctx.currentTime >= playEnd - 0.1) {
+                    isSpeakingRef.current = false;
+                    if (wsRef.current?.readyState === WebSocket.OPEN) {
+                      updateState('listening');
+                    }
+                  }
+                }, waitMs);
+              }
             }
           }
 
           if (msg.type === 'interruption') {
             nextPlayTimeRef.current = 0;
+            isSpeakingRef.current = false;
             setAgentText('');
             updateState('listening');
           }
