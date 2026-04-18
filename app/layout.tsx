@@ -19,6 +19,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       </head>
       <body>
         {children}
+        {/* ElevenLabs Conversational AI Widget — connected to real Jarvis via Custom LLM bridge */}
+        <script src="https://elevenlabs.io/convai-widget/index.js" async />
       </body>
     </html>
   );

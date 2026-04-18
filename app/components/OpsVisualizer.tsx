@@ -2016,6 +2016,10 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
           {voiceState === 'speaking' && '◆ SPEAKING'}
         </div>
       )}
+
+      {/* ElevenLabs Conversational AI Widget — real Jarvis via Custom LLM bridge */}
+      {/* @ts-expect-error — custom web component from ElevenLabs script */}
+      <elevenlabs-convai agent-id="agent_8701kph1cb49ey5rhrrhcfkqjszq" />
     </div>
   );
 }
