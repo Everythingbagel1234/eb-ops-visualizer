@@ -5,15 +5,7 @@ export const maxDuration = 30;
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
 
-const JARVIS_SYSTEM_PROMPT = `You are Jarvis, the AI Chief of Staff for Everything Bagel Partners LLC — a performance marketing agency run by Gabe Wolff. You run on Gabe's Mac mini and oversee all operations: 48+ automated crons, data pipelines, client dashboards, security monitoring, and team coordination.
-
-Respond like JARVIS from Iron Man — professional, slightly witty, highly capable. Be concise — under 3 sentences unless the question requires detail. Never use markdown. Speak naturally and conversationally.
-
-Key context:
-- Clients: Homedics, Purity Coffee, STJ Apparel, IQ Bar, Primal Bee, Dirty Dough, and others
-- Team: Amanda (COO), John (Sr Performance Strategist), Omar (Performance Strategist), Jylle (Marketing Ops), Jeff (Creative Director)
-- You manage real-time data from Meta Ads, Google Ads, TikTok Ads, Shopify, Klaviyo, Amazon into BigQuery
-- Command Center: eb-command-center.vercel.app (team task management)`;
+const JARVIS_SYSTEM_PROMPT = `You are Jarvis, the AI Chief of Staff for Everything Bagel Partners LLC — a performance marketing agency run by Gabe Wolff. Respond like JARVIS from Iron Man — professional, slightly witty, highly capable. Be concise — under 3 sentences. Never use markdown. Speak naturally.`;
 
 interface ChatMessage {
   role: string;
@@ -21,23 +13,28 @@ interface ChatMessage {
 }
 
 interface ChatCompletionRequest {
-  messages: ChatMessage[];
+  messages?: ChatMessage[];
   model?: string;
   stream?: boolean;
 }
 
 export async function POST(request: Request) {
+  // Log that we received a request (visible in Vercel logs)
+  console.log('[v1/chat/completions] Request received');
+
   try {
     const body = await request.json() as ChatCompletionRequest;
     const messages = body.messages || [];
     const lastUserMsg = [...messages].reverse().find(m => m.role === 'user');
     const userText = lastUserMsg?.content || '';
 
+    console.log('[v1/chat/completions] User text:', userText?.slice(0, 100));
+
     if (!userText) {
       return NextResponse.json({ error: 'No user message' }, { status: 400 });
     }
 
-    // Call Anthropic with streaming
+    // Call Anthropic API (non-streaming for simplicity, then format as SSE)
     const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -47,79 +44,58 @@ export async function POST(request: Request) {
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',
-        max_tokens: 300,
+        max_tokens: 200,
         system: JARVIS_SYSTEM_PROMPT,
         messages: [{ role: 'user', content: userText }],
-        stream: true,
       }),
     });
 
     if (!anthropicRes.ok) {
       const err = await anthropicRes.text();
-      console.error('[llm-bridge] Anthropic error:', err);
+      console.error('[v1/chat/completions] Anthropic error:', err?.slice(0, 200));
       return NextResponse.json({ error: 'LLM error' }, { status: 500 });
     }
 
-    // Transform Anthropic SSE → OpenAI-compatible SSE
+    const anthropicData = await anthropicRes.json() as {
+      content: Array<{ type: string; text: string }>;
+    };
+    const replyText = anthropicData.content?.[0]?.text || 'I apologize, I could not process that.';
+
+    console.log('[v1/chat/completions] Reply:', replyText?.slice(0, 100));
+
+    // Return as OpenAI-compatible SSE stream
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
-      async start(controller) {
-        // Send role chunk
-        const roleChunk = {
-          id: `chatcmpl-${Date.now()}`,
+      start(controller) {
+        const ts = Math.floor(Date.now() / 1000);
+
+        // Role chunk
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+          id: `chatcmpl-${ts}`,
           object: 'chat.completion.chunk',
-          created: Math.floor(Date.now() / 1000),
+          created: ts,
           model: 'jarvis-bridge',
           choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }],
-        };
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(roleChunk)}\n\n`));
+        })}\n\n`));
 
-        const reader = anthropicRes.body!.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-
-        try {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
-            buffer = lines.pop() || '';
-
-            for (const line of lines) {
-              if (!line.startsWith('data: ')) continue;
-              const data = line.slice(6).trim();
-              if (data === '[DONE]') continue;
-
-              try {
-                const event = JSON.parse(data);
-                if (event.type === 'content_block_delta' && event.delta?.text) {
-                  const chunk = {
-                    id: `chatcmpl-${Date.now()}`,
-                    object: 'chat.completion.chunk',
-                    created: Math.floor(Date.now() / 1000),
-                    model: 'jarvis-bridge',
-                    choices: [{ index: 0, delta: { content: event.delta.text }, finish_reason: null }],
-                  };
-                  controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
-                }
-              } catch { /* ignore */ }
-            }
-          }
-        } catch (err) {
-          console.error('[llm-bridge] Stream error:', err);
-        }
+        // Content chunk (send full response at once for speed)
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+          id: `chatcmpl-${ts}-1`,
+          object: 'chat.completion.chunk',
+          created: ts,
+          model: 'jarvis-bridge',
+          choices: [{ index: 0, delta: { content: replyText }, finish_reason: null }],
+        })}\n\n`));
 
         // Finish chunk
-        const finishChunk = {
-          id: `chatcmpl-${Date.now()}`,
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+          id: `chatcmpl-${ts}-2`,
           object: 'chat.completion.chunk',
-          created: Math.floor(Date.now() / 1000),
+          created: ts,
           model: 'jarvis-bridge',
           choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
-        };
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(finishChunk)}\n\n`));
+        })}\n\n`));
+
         controller.enqueue(encoder.encode('data: [DONE]\n\n'));
         controller.close();
       },
@@ -133,7 +109,7 @@ export async function POST(request: Request) {
       },
     });
   } catch (err) {
-    console.error('[llm-bridge] Error:', err);
+    console.error('[v1/chat/completions] Error:', err);
     return NextResponse.json({ error: 'Internal error' }, { status: 500 });
   }
 }
