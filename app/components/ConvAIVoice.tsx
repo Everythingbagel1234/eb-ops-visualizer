@@ -59,9 +59,12 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortedRef = useRef(false);
   const listeningStartRef = useRef(0);
+  const isActiveRef = useRef(false);
+  const stateRef = useRef<VState>('idle');
 
   const updateState = useCallback((s: VState) => {
     setState(s);
+    stateRef.current = s;
     onStateChange?.(s);
   }, [onStateChange]);
 
@@ -152,14 +155,14 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
         if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
         const cmd = bufferRef.current.trim();
         bufferRef.current = '';
+        abortedRef.current = true;
         sendToJarvis(cmd);
         return;
       }
-      // Auto-restart if still in listening mode
-      if (!abortedRef.current && isActive) {
+      // Auto-restart if still active and listening
+      if (!abortedRef.current && isActiveRef.current && stateRef.current === 'listening') {
         setTimeout(() => {
           try {
-            abortedRef.current = false;
             recognitionRef.current?.start();
           } catch { /* ignore */ }
         }, 300);
@@ -184,8 +187,9 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
   }
 
   function startConversation() {
-    if (isActive) return;
+    if (isActiveRef.current) return;
     setIsActive(true);
+    isActiveRef.current = true;
     setTranscript('');
     setAgentText('');
     bufferRef.current = '';
@@ -195,6 +199,7 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
 
   function stopConversation() {
     abortedRef.current = true;
+    isActiveRef.current = false;
     recognitionRef.current?.abort();
     audioRef.current?.pause();
     if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
