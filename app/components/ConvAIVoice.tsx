@@ -24,14 +24,14 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
   const [transcript, setTranscript] = useState('');
   const [agentText, setAgentText] = useState('');
   const [isActive, setIsActive] = useState(false);
-  const [, setMicGranted] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const workletRef = useRef<AudioWorkletNode | null>(null);
+  const playbackCtxRef = useRef<AudioContext | null>(null);
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const micCtxRef = useRef<AudioContext | null>(null);
+  const processorRef = useRef<ScriptProcessorNode | null>(null);
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
-  const audioQueueRef = useRef<Float32Array[]>([]);
+  const audioQueueRef = useRef<ArrayBuffer[]>([]);
   const isPlayingRef = useRef(false);
   const nextPlayTimeRef = useRef(0);
 
@@ -40,8 +40,41 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
     onStateChange?.(s);
   }, [onStateChange]);
 
-  // Convert base64 to Float32Array (PCM 16-bit → float)
-  function base64ToFloat32(base64: string): Float32Array {
+  // Downsample from native sample rate to 16000Hz
+  function downsample(buffer: Float32Array, fromRate: number, toRate: number): Float32Array {
+    if (fromRate === toRate) return buffer;
+    const ratio = fromRate / toRate;
+    const newLength = Math.round(buffer.length / ratio);
+    const result = new Float32Array(newLength);
+    for (let i = 0; i < newLength; i++) {
+      const index = Math.round(i * ratio);
+      result[i] = buffer[Math.min(index, buffer.length - 1)];
+    }
+    return result;
+  }
+
+  // Convert Float32 samples to 16-bit PCM ArrayBuffer
+  function float32ToPCM16(samples: Float32Array): ArrayBuffer {
+    const pcm = new Int16Array(samples.length);
+    for (let i = 0; i < samples.length; i++) {
+      const s = Math.max(-1, Math.min(1, samples[i]));
+      pcm[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    }
+    return pcm.buffer;
+  }
+
+  // ArrayBuffer to base64
+  function arrayBufferToBase64(buffer: ArrayBuffer): string {
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+  }
+
+  // Base64 PCM16 to AudioBuffer for playback
+  function base64ToAudioBuffer(base64: string, ctx: AudioContext): AudioBuffer {
     const binary = atob(base64);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) {
@@ -52,84 +85,24 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
     for (let i = 0; i < int16.length; i++) {
       float32[i] = int16[i] / 32768;
     }
-    return float32;
+    const buffer = ctx.createBuffer(1, float32.length, 16000);
+    buffer.getChannelData(0).set(float32);
+    return buffer;
   }
 
-  // Play audio chunks
-  function playAudioChunk(float32Data: Float32Array) {
-    const ctx = audioCtxRef.current;
+  function playAudioBase64(base64: string) {
+    const ctx = playbackCtxRef.current;
     if (!ctx) return;
 
-    const buffer = ctx.createBuffer(1, float32Data.length, 16000);
-    buffer.getChannelData(0).set(float32Data);
-
+    const audioBuffer = base64ToAudioBuffer(base64, ctx);
     const source = ctx.createBufferSource();
-    source.buffer = buffer;
+    source.buffer = audioBuffer;
     source.connect(ctx.destination);
 
-    const currentTime = ctx.currentTime;
-    const startTime = Math.max(currentTime, nextPlayTimeRef.current);
+    const now = ctx.currentTime;
+    const startTime = Math.max(now, nextPlayTimeRef.current);
     source.start(startTime);
-    nextPlayTimeRef.current = startTime + buffer.duration;
-
-    source.onended = () => {
-      // Check if more audio in queue
-      if (audioQueueRef.current.length > 0) {
-        const next = audioQueueRef.current.shift()!;
-        playAudioChunk(next);
-      } else {
-        isPlayingRef.current = false;
-        // Don't go to idle yet — wait for agent to finish
-      }
-    };
-  }
-
-  function queueAudio(float32Data: Float32Array) {
-    if (isPlayingRef.current) {
-      audioQueueRef.current.push(float32Data);
-    } else {
-      isPlayingRef.current = true;
-      playAudioChunk(float32Data);
-    }
-  }
-
-  // AudioWorklet processor code as a blob URL
-  function createWorkletUrl(): string {
-    const code = `
-      class PCMProcessor extends AudioWorkletProcessor {
-        constructor() {
-          super();
-          this._buffer = new Float32Array(0);
-        }
-        process(inputs) {
-          const input = inputs[0];
-          if (input && input[0]) {
-            const samples = input[0];
-            // Accumulate and send when we have enough
-            const newBuf = new Float32Array(this._buffer.length + samples.length);
-            newBuf.set(this._buffer);
-            newBuf.set(samples, this._buffer.length);
-            this._buffer = newBuf;
-            
-            // Send every ~4096 samples (256ms at 16kHz)
-            if (this._buffer.length >= 4096) {
-              // Convert to 16-bit PCM
-              const pcm = new Int16Array(this._buffer.length);
-              for (let i = 0; i < this._buffer.length; i++) {
-                const s = Math.max(-1, Math.min(1, this._buffer[i]));
-                pcm[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-              }
-              this.port.postMessage(pcm.buffer, [pcm.buffer]);
-              this._buffer = new Float32Array(0);
-            }
-          }
-          return true;
-        }
-      }
-      registerProcessor('pcm-processor', PCMProcessor);
-    `;
-    const blob = new Blob([code], { type: 'application/javascript' });
-    return URL.createObjectURL(blob);
+    nextPlayTimeRef.current = startTime + audioBuffer.duration;
   }
 
   async function startConversation() {
@@ -140,68 +113,68 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
     setAgentText('');
     audioQueueRef.current = [];
     isPlayingRef.current = false;
+    nextPlayTimeRef.current = 0;
 
     try {
-      // 1. Get signed URL
+      // 1. Get signed URL from our API
       const tokenRes = await fetch('/api/voice-token');
       const tokenData = await tokenRes.json() as { signed_url?: string; error?: string };
       if (!tokenData.signed_url) {
         throw new Error(tokenData.error || 'No signed URL');
       }
 
-      // 2. Set up AudioContext at 16kHz
-      const ctx = new AudioContext({ sampleRate: 16000 });
-      audioCtxRef.current = ctx;
-      nextPlayTimeRef.current = 0;
-
-      // 3. Get microphone
+      // 2. Get microphone FIRST (requires user gesture on mobile)
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
-          sampleRate: 16000,
-          channelCount: 1,
           echoCancellation: true,
           noiseSuppression: true,
+          autoGainControl: true,
         }
       });
-      streamRef.current = stream;
-      setMicGranted(true);
+      micStreamRef.current = stream;
 
-      // 4. Connect WebSocket
+      // 3. Create playback AudioContext (can be any sample rate)
+      const playCtx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
+      playbackCtxRef.current = playCtx;
+
+      // 4. Create mic AudioContext (native rate, we'll downsample)
+      const micCtx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
+      micCtxRef.current = micCtx;
+      const nativeSampleRate = micCtx.sampleRate;
+
+      // 5. Connect WebSocket
       const ws = new WebSocket(tokenData.signed_url);
       wsRef.current = ws;
 
-      ws.onopen = async () => {
+      ws.onopen = () => {
         updateState('listening');
 
-        // Set up audio worklet for mic capture
-        const workletUrl = createWorkletUrl();
-        await ctx.audioWorklet.addModule(workletUrl);
-        URL.revokeObjectURL(workletUrl);
-
-        const source = ctx.createMediaStreamSource(stream);
+        // Set up mic capture using ScriptProcessorNode (broad compatibility)
+        const source = micCtx.createMediaStreamSource(stream);
         sourceRef.current = source;
-        const worklet = new AudioWorkletNode(ctx, 'pcm-processor');
-        workletRef.current = worklet;
 
-        worklet.port.onmessage = (e: MessageEvent) => {
-          if (ws.readyState === WebSocket.OPEN) {
-            // Send raw PCM bytes as binary
-            const pcmBuffer = e.data as ArrayBuffer;
-            // Base64 encode for ElevenLabs
-            const uint8 = new Uint8Array(pcmBuffer);
-            let binary = '';
-            for (let i = 0; i < uint8.length; i++) {
-              binary += String.fromCharCode(uint8[i]);
-            }
-            const b64 = btoa(binary);
-            ws.send(JSON.stringify({
-              user_audio_chunk: b64,
-            }));
-          }
+        // 4096 buffer size — balanced latency/performance
+        const processor = micCtx.createScriptProcessor(4096, 1, 1);
+        processorRef.current = processor;
+
+        processor.onaudioprocess = (e: AudioProcessingEvent) => {
+          if (ws.readyState !== WebSocket.OPEN) return;
+
+          const inputData = e.inputBuffer.getChannelData(0);
+          // Downsample to 16kHz
+          const downsampled = downsample(inputData, nativeSampleRate, 16000);
+          // Convert to 16-bit PCM
+          const pcmBuffer = float32ToPCM16(downsampled);
+          // Base64 encode
+          const b64 = arrayBufferToBase64(pcmBuffer);
+          // Send to ElevenLabs
+          ws.send(JSON.stringify({
+            user_audio_chunk: b64,
+          }));
         };
 
-        source.connect(worklet);
-        worklet.connect(ctx.destination); // needed to keep worklet running
+        source.connect(processor);
+        processor.connect(micCtx.destination);
       };
 
       ws.onmessage = (event: MessageEvent) => {
@@ -210,12 +183,12 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
 
           switch (msg.type) {
             case 'conversation_initiation_metadata':
-              // Agent is ready
+              // Agent ready — conversation_id available
               break;
 
             case 'user_transcript':
-              if (msg.user_transcript_event?.user_transcript) {
-                setTranscript(msg.user_transcript_event.user_transcript);
+              if (msg.user_transcription_event?.user_transcript) {
+                setTranscript(msg.user_transcription_event.user_transcript);
               }
               break;
 
@@ -229,16 +202,14 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
             case 'audio':
               if (msg.audio_event?.audio_base_64) {
                 updateState('speaking');
-                const float32 = base64ToFloat32(msg.audio_event.audio_base_64);
-                queueAudio(float32);
+                playAudioBase64(msg.audio_event.audio_base_64);
               }
               break;
 
             case 'interruption':
-              // User interrupted — clear audio queue
-              audioQueueRef.current = [];
-              isPlayingRef.current = false;
+              // User interrupted — stop audio
               nextPlayTimeRef.current = 0;
+              isPlayingRef.current = false;
               setAgentText('');
               updateState('listening');
               break;
@@ -250,7 +221,17 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
               break;
 
             case 'ping':
-              ws.send(JSON.stringify({ type: 'pong', event_id: msg.ping_event?.event_id }));
+              if (msg.ping_event) {
+                const delay = msg.ping_event.ping_ms || 0;
+                setTimeout(() => {
+                  if (ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                      type: 'pong',
+                      event_id: msg.ping_event.event_id,
+                    }));
+                  }
+                }, delay);
+              }
               break;
           }
         } catch {
@@ -264,14 +245,15 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
         setIsActive(false);
       };
 
-      ws.onerror = () => {
+      ws.onerror = (err) => {
+        console.error('[convai] WebSocket error:', err);
         cleanup();
         updateState('idle');
         setIsActive(false);
       };
 
     } catch (err) {
-      console.error('[convai] Error:', err);
+      console.error('[convai] Start error:', err);
       cleanup();
       updateState('idle');
       setIsActive(false);
@@ -288,27 +270,28 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
   }
 
   function cleanup() {
-    workletRef.current?.disconnect();
+    processorRef.current?.disconnect();
     sourceRef.current?.disconnect();
-    streamRef.current?.getTracks().forEach(t => t.stop());
-    audioCtxRef.current?.close().catch(() => {});
+    micStreamRef.current?.getTracks().forEach(t => t.stop());
+    micCtxRef.current?.close().catch(() => {});
+    playbackCtxRef.current?.close().catch(() => {});
     wsRef.current = null;
-    audioCtxRef.current = null;
-    streamRef.current = null;
-    workletRef.current = null;
+    micCtxRef.current = null;
+    playbackCtxRef.current = null;
+    micStreamRef.current = null;
+    processorRef.current = null;
     sourceRef.current = null;
     audioQueueRef.current = [];
     isPlayingRef.current = false;
     nextPlayTimeRef.current = 0;
   }
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => { cleanup(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const stateLabel = {
+  const stateLabel: Record<ConvState, string> = {
     idle: '',
     connecting: 'CONNECTING',
     listening: '◉ LISTENING',
@@ -316,7 +299,7 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
     speaking: '◆ SPEAKING',
   };
 
-  const stateColor = {
+  const stateColor: Record<ConvState, string> = {
     idle: 'rgba(245,158,11,0.3)',
     connecting: 'rgba(34,211,238,0.7)',
     listening: AMBER,
@@ -349,11 +332,10 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
             ? `0 0 20px ${stateColor[state]}44, 0 0 40px ${stateColor[state]}22`
             : `0 0 10px rgba(245,158,11,0.15)`,
           transition: 'all 0.3s ease',
-          animation: state === 'listening' ? 'voice-pulse 1.5s ease-in-out infinite' : 'none',
+          animation: state === 'listening' ? 'voice-btn-pulse 1.5s ease-in-out infinite' : 'none',
         }}
         title={isActive ? 'End conversation' : 'Talk to Jarvis'}
       >
-        {/* Mic / Stop icon */}
         {isActive ? (
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke={stateColor[state]} strokeWidth="2">
             <rect x="6" y="6" width="12" height="12" rx="2" />
@@ -366,121 +348,86 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
           </svg>
         )}
 
-        {/* Pulse rings when active */}
         {isActive && state !== 'idle' && (
           <>
             <div style={{
-              position: 'absolute',
-              inset: -4,
-              borderRadius: '50%',
-              border: `1px solid ${stateColor[state]}`,
-              opacity: 0.4,
+              position: 'absolute', inset: -4, borderRadius: '50%',
+              border: `1px solid ${stateColor[state]}`, opacity: 0.4,
               animation: 'voice-ring-out 2s ease-out infinite',
             }} />
             <div style={{
-              position: 'absolute',
-              inset: -8,
-              borderRadius: '50%',
-              border: `1px solid ${stateColor[state]}`,
-              opacity: 0.2,
+              position: 'absolute', inset: -8, borderRadius: '50%',
+              border: `1px solid ${stateColor[state]}`, opacity: 0.2,
               animation: 'voice-ring-out 2s ease-out 0.5s infinite',
             }} />
           </>
         )}
       </button>
 
-      {/* Status label above button */}
+      {/* Status label */}
       {isActive && state !== 'idle' && (
         <div style={{
-          position: 'fixed',
-          bottom: 88,
-          right: 24,
-          zIndex: 100,
-          fontSize: 9,
-          fontFamily: "'JetBrains Mono', monospace",
-          letterSpacing: '0.2em',
-          color: stateColor[state],
+          position: 'fixed', bottom: 88, right: 24, zIndex: 100,
+          fontSize: 9, fontFamily: "'JetBrains Mono', monospace",
+          letterSpacing: '0.2em', color: stateColor[state],
           textShadow: `0 0 8px ${stateColor[state]}`,
-          textAlign: 'right',
-          whiteSpace: 'nowrap',
+          textAlign: 'right', whiteSpace: 'nowrap',
         }}>
           {stateLabel[state]}
         </div>
       )}
 
-      {/* Transcript/Response overlay — slides up from bottom */}
+      {/* Transcript/Response overlay */}
       {isActive && (transcript || agentText) && (
         <div style={{
-          position: 'fixed',
-          bottom: 96,
-          right: 24,
-          zIndex: 99,
-          maxWidth: 360,
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 8,
-          animation: 'slide-up 0.3s ease-out',
+          position: 'fixed', bottom: 96, right: 24, zIndex: 99,
+          maxWidth: 360, display: 'flex', flexDirection: 'column',
+          gap: 8, animation: 'convai-slide-up 0.3s ease-out',
         }}>
-          {/* User transcript */}
           {transcript && (
             <div style={{
               padding: '8px 14px',
               background: 'rgba(245,158,11,0.08)',
               border: '1px solid rgba(245,158,11,0.2)',
-              borderRadius: 8,
-              backdropFilter: 'blur(8px)',
+              borderRadius: 8, backdropFilter: 'blur(8px)',
             }}>
               <div style={{
-                fontSize: 8,
-                color: 'rgba(245,158,11,0.5)',
-                letterSpacing: '0.2em',
-                marginBottom: 4,
+                fontSize: 8, color: 'rgba(245,158,11,0.5)',
+                letterSpacing: '0.2em', marginBottom: 4,
                 fontFamily: "'JetBrains Mono', monospace",
               }}>YOU</div>
               <div style={{
-                fontSize: 12,
-                color: GOLD,
+                fontSize: 12, color: GOLD,
                 fontFamily: "'JetBrains Mono', monospace",
                 lineHeight: 1.5,
-              }}>
-                {transcript}
-              </div>
+              }}>{transcript}</div>
             </div>
           )}
 
-          {/* Agent response */}
           {agentText && (
             <div style={{
               padding: '8px 14px',
               background: 'rgba(34,197,94,0.06)',
               border: '1px solid rgba(34,197,94,0.2)',
-              borderRadius: 8,
-              backdropFilter: 'blur(8px)',
+              borderRadius: 8, backdropFilter: 'blur(8px)',
             }}>
               <div style={{
-                fontSize: 8,
-                color: 'rgba(34,197,94,0.5)',
-                letterSpacing: '0.2em',
-                marginBottom: 4,
+                fontSize: 8, color: 'rgba(34,197,94,0.5)',
+                letterSpacing: '0.2em', marginBottom: 4,
                 fontFamily: "'JetBrains Mono', monospace",
               }}>JARVIS</div>
               <div style={{
-                fontSize: 12,
-                color: GREEN,
+                fontSize: 12, color: GREEN,
                 fontFamily: "'JetBrains Mono', monospace",
-                lineHeight: 1.5,
-                maxHeight: 200,
-                overflowY: 'auto',
-              }}>
-                {agentText}
-              </div>
+                lineHeight: 1.5, maxHeight: 200, overflowY: 'auto',
+              }}>{agentText}</div>
             </div>
           )}
         </div>
       )}
 
       <style>{`
-        @keyframes voice-pulse {
+        @keyframes voice-btn-pulse {
           0%, 100% { transform: scale(1); }
           50% { transform: scale(1.05); }
         }
@@ -488,7 +435,7 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
           0% { transform: scale(1); opacity: 0.4; }
           100% { transform: scale(1.8); opacity: 0; }
         }
-        @keyframes slide-up {
+        @keyframes convai-slide-up {
           from { transform: translateY(10px); opacity: 0; }
           to { transform: translateY(0); opacity: 1; }
         }
