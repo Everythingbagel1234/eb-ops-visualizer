@@ -4,15 +4,6 @@ import { useEffect, useRef, useCallback, useState } from 'react';
 import type { CronJob, SecurityData, StatusResponse } from '../api/status/route';
 import type { SlackMessage } from '../api/slack/route';
 import VoiceInterface, { type VoiceState } from './VoiceInterface';
-import dynamic from 'next/dynamic';
-
-// Feature flag: use ElevenLabs Conversational AI (low-latency) vs legacy voice
-// DISABLED — causing client-side crash. Reverting to legacy voice until debugged.
-const USE_CONVERSATIONAL_AI = false;
-
-// Dynamic import to avoid SSR issues with WebRTC/MediaDevices
-const VoiceConversation = dynamic(() => import('./VoiceConversation'), { ssr: false });
-type ConvVoiceState = 'idle' | 'listening' | 'processing' | 'speaking';
 
 /* ─── Constants ──────────────────────────────────────────────── */
 const AMBER   = '#F59E0B';
@@ -1804,21 +1795,15 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
       {/* Voice Interface (orb click handler + overlay) */}
       <div style={{ position: 'absolute', inset: 0, zIndex: 5, pointerEvents: 'none' }}>
         <div style={{ pointerEvents: 'auto' }}>
-          {USE_CONVERSATIONAL_AI ? (
-            <VoiceConversation
-              onStateChange={(s: ConvVoiceState) => handleVoiceStateChange(s as VoiceState)}
-            />
-          ) : (
-            <VoiceInterface
-              onStateChange={handleVoiceStateChange}
-              cronContext={{
-                ok: status?.crons.filter(c => c.lastStatus === 'ok').length ?? 0,
-                error: errorCount,
-                total: totalCrons,
-              }}
-              errorContext={errorJobs.map(j => j.name)}
-            />
-          )}
+          <VoiceInterface
+            onStateChange={handleVoiceStateChange}
+            cronContext={{
+              ok: status?.crons.filter(c => c.lastStatus === 'ok').length ?? 0,
+              error: errorCount,
+              total: totalCrons,
+            }}
+            errorContext={errorJobs.map(j => j.name)}
+          />
         </div>
       </div>
 
