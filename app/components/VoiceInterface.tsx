@@ -234,14 +234,14 @@ export default function VoiceInterface({ onStateChange, cronContext, errorContex
             // Reset silence timer
             if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
             silenceTimerRef.current = setTimeout(() => {
-              // 2s of silence — send command
+              // 4s of silence — send command (was 2s, too aggressive)
               if (commandBufferRef.current.trim()) {
                 recognition.stop();
                 sendCommand(commandBufferRef.current.trim());
                 commandBufferRef.current = '';
                 wakeWordDetectedRef.current = false;
               }
-            }, 2000);
+            }, 4000);
           } else {
             // Show interim transcript
             const interim = commandBufferRef.current + ' ' + (result[0]?.transcript || '');

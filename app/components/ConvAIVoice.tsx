@@ -5,12 +5,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 /**
  * Custom Conversational AI Voice — JARVIS HUD styled
  * Uses ElevenLabs WebSocket API via signed URLs.
- * 
- * Behavior:
- * - Tap mic button → connects WebSocket, starts listening silently
- * - Speaks to activate (wake word is handled by ElevenLabs agent prompt)
- * - Shows transcript + response overlay
- * - Tap again to end conversation
+ * Mic capture via ScriptProcessorNode with iOS workarounds.
  */
 
 const AMBER = '#F59E0B';
@@ -18,7 +13,7 @@ const GOLD  = '#FCD34D';
 const GREEN = '#22C55E';
 const CYAN  = '#22D3EE';
 
-type ConvState = 'idle' | 'connecting' | 'listening' | 'thinking' | 'speaking';
+type ConvState = 'idle' | 'connecting' | 'listening' | 'thinking' | 'speaking' | 'error';
 
 interface ConvAIVoiceProps {
   onStateChange?: (state: ConvState) => void;
@@ -29,17 +24,16 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
   const [transcript, setTranscript] = useState('');
   const [agentText, setAgentText] = useState('');
   const [isActive, setIsActive] = useState(false);
+  const [debugMsg, setDebugMsg] = useState('');
 
   const wsRef = useRef<WebSocket | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
-  const recorderRef = useRef<MediaRecorder | null>(null);
-  // For ScriptProcessor path
   const micCtxRef = useRef<AudioContext | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
-  // For playback
   const playCtxRef = useRef<AudioContext | null>(null);
   const nextPlayTimeRef = useRef(0);
+  const chunksSentRef = useRef(0);
 
   const updateState = useCallback((s: ConvState) => {
     setState(s);
@@ -71,7 +65,12 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
   function toBase64(buf: ArrayBuffer): string {
     const u8 = new Uint8Array(buf);
     let s = '';
-    for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
+    // Process in chunks to avoid call stack overflow on large buffers
+    const CHUNK = 8192;
+    for (let i = 0; i < u8.length; i += CHUNK) {
+      const slice = u8.subarray(i, Math.min(i + CHUNK, u8.length));
+      for (let j = 0; j < slice.length; j++) s += String.fromCharCode(slice[j]);
+    }
     return btoa(s);
   }
 
@@ -98,58 +97,12 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
     src.connect(ctx.destination);
 
     const now = ctx.currentTime;
-    const start = Math.max(now, nextPlayTimeRef.current);
+    const start = Math.max(now + 0.01, nextPlayTimeRef.current);
     src.start(start);
     nextPlayTimeRef.current = start + audioBuf.duration;
   }
 
-  // ─── Mic Capture via ScriptProcessor ──────────────────────
-
-  function startMicCapture(stream: MediaStream, ws: WebSocket) {
-    // Create a separate AudioContext for mic (don't reuse playback)
-    const ctx = new AudioContext();
-    micCtxRef.current = ctx;
-
-    // Resume in case iOS suspended it
-    if (ctx.state === 'suspended') {
-      ctx.resume();
-    }
-
-    const nativeRate = ctx.sampleRate;
-    const source = ctx.createMediaStreamSource(stream);
-    sourceNodeRef.current = source;
-
-    // ScriptProcessor with 4096 buffer, mono input, mono output
-    const processor = ctx.createScriptProcessor(4096, 1, 1);
-    processorRef.current = processor;
-
-    processor.onaudioprocess = (e) => {
-      if (ws.readyState !== WebSocket.OPEN) return;
-
-      const raw = e.inputBuffer.getChannelData(0);
-
-      // Check if we're actually getting audio (not all zeros)
-      let sum = 0;
-      for (let i = 0; i < raw.length; i++) sum += Math.abs(raw[i]);
-      if (sum === 0) return; // silent frame, skip
-
-      const down = downsample(raw, nativeRate, 16000);
-      const pcm = float32ToPCM16(down);
-      const b64 = toBase64(pcm);
-
-      ws.send(JSON.stringify({ user_audio_chunk: b64 }));
-    };
-
-    source.connect(processor);
-    // Connect processor to destination to keep it alive (required on Safari/iOS)
-    // Use a gain node at 0 to avoid feedback
-    const silentGain = ctx.createGain();
-    silentGain.gain.value = 0;
-    processor.connect(silentGain);
-    silentGain.connect(ctx.destination);
-  }
-
-  // ─── Conversation Lifecycle ───────────────────────────────
+  // ─── Start Conversation ───────────────────────────────────
 
   async function startConversation() {
     if (isActive) return;
@@ -157,16 +110,19 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
     updateState('connecting');
     setTranscript('');
     setAgentText('');
+    setDebugMsg('Getting mic...');
     nextPlayTimeRef.current = 0;
+    chunksSentRef.current = 0;
 
     try {
-      // 1. Get mic FIRST (user gesture required on iOS)
+      // 1. Get mic FIRST (user gesture on iOS)
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
       });
       micStreamRef.current = stream;
+      setDebugMsg('Mic granted. Getting token...');
 
-      // 2. Create playback context (warm it up with user gesture)
+      // 2. Warm up playback context with user gesture
       const pCtx = new AudioContext();
       playCtxRef.current = pCtx;
       if (pCtx.state === 'suspended') await pCtx.resume();
@@ -175,15 +131,59 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
       const res = await fetch('/api/voice-token');
       const data = await res.json() as { signed_url?: string; error?: string };
       if (!data.signed_url) throw new Error(data.error || 'No signed URL');
+      setDebugMsg('Connecting WebSocket...');
 
       // 4. Open WebSocket
       const ws = new WebSocket(data.signed_url);
       wsRef.current = ws;
 
       ws.onopen = () => {
-        updateState('listening');
-        // Start sending mic audio
-        startMicCapture(stream, ws);
+        setDebugMsg('Connected! Setting up mic...');
+        
+        // Create mic AudioContext
+        const micCtx = new AudioContext();
+        micCtxRef.current = micCtx;
+        
+        // Resume (iOS requirement)
+        const resumeAndSetup = () => {
+          const nativeRate = micCtx.sampleRate;
+          setDebugMsg(`Mic rate: ${nativeRate}Hz`);
+
+          const source = micCtx.createMediaStreamSource(stream);
+          sourceNodeRef.current = source;
+
+          const processor = micCtx.createScriptProcessor(4096, 1, 1);
+          processorRef.current = processor;
+
+          processor.onaudioprocess = (e) => {
+            if (ws.readyState !== WebSocket.OPEN) return;
+            const raw = e.inputBuffer.getChannelData(0);
+            const down = downsample(raw, nativeRate, 16000);
+            const pcm = float32ToPCM16(down);
+            const b64 = toBase64(pcm);
+            ws.send(JSON.stringify({ user_audio_chunk: b64 }));
+            chunksSentRef.current++;
+            if (chunksSentRef.current <= 3 || chunksSentRef.current % 20 === 0) {
+              setDebugMsg(`Sending audio... (${chunksSentRef.current} chunks)`);
+            }
+          };
+
+          source.connect(processor);
+          // Silent output to keep processor alive (iOS/Safari requirement)
+          const silentGain = micCtx.createGain();
+          silentGain.gain.value = 0;
+          processor.connect(silentGain);
+          silentGain.connect(micCtx.destination);
+
+          updateState('listening');
+          setDebugMsg('');
+        };
+
+        if (micCtx.state === 'suspended') {
+          micCtx.resume().then(resumeAndSetup);
+        } else {
+          resumeAndSetup();
+        }
       };
 
       ws.onmessage = (event) => {
@@ -192,7 +192,10 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
 
           if (msg.type === 'user_transcript') {
             const txt = msg.user_transcription_event?.user_transcript;
-            if (txt) setTranscript(txt);
+            if (txt) {
+              setTranscript(txt);
+              setDebugMsg('');
+            }
           }
 
           if (msg.type === 'agent_response') {
@@ -233,23 +236,41 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
         } catch { /* ignore */ }
       };
 
-      ws.onclose = () => {
-        cleanup();
-        updateState('idle');
-        setIsActive(false);
+      ws.onclose = (e) => {
+        const reason = e.reason || `code ${e.code}`;
+        console.log('[convai] WS closed:', reason);
+        if (e.code === 3000) {
+          setDebugMsg(`Error: ${reason}`);
+          updateState('error');
+        } else {
+          cleanup();
+          updateState('idle');
+          setIsActive(false);
+        }
       };
 
       ws.onerror = () => {
+        setDebugMsg('WebSocket error');
         cleanup();
-        updateState('idle');
-        setIsActive(false);
+        updateState('error');
+        setTimeout(() => {
+          updateState('idle');
+          setIsActive(false);
+          setDebugMsg('');
+        }, 3000);
       };
 
     } catch (err) {
-      console.error('[convai]', err);
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      console.error('[convai]', msg);
+      setDebugMsg(`Error: ${msg}`);
       cleanup();
-      updateState('idle');
-      setIsActive(false);
+      updateState('error');
+      setTimeout(() => {
+        updateState('idle');
+        setIsActive(false);
+        setDebugMsg('');
+      }, 3000);
     }
   }
 
@@ -258,6 +279,7 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
     cleanup();
     updateState('idle');
     setIsActive(false);
+    setDebugMsg('');
   }
 
   function cleanup() {
@@ -266,15 +288,14 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
     micStreamRef.current?.getTracks().forEach(t => t.stop());
     micCtxRef.current?.close().catch(() => {});
     playCtxRef.current?.close().catch(() => {});
-    recorderRef.current?.stop();
     wsRef.current = null;
     micCtxRef.current = null;
     playCtxRef.current = null;
     micStreamRef.current = null;
     processorRef.current = null;
     sourceNodeRef.current = null;
-    recorderRef.current = null;
     nextPlayTimeRef.current = 0;
+    chunksSentRef.current = 0;
   }
 
   useEffect(() => () => { cleanup(); }, []);
@@ -282,12 +303,12 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
   // ─── Render ───────────────────────────────────────────────
 
   const stateLabel: Record<ConvState, string> = {
-    idle: '', connecting: 'CONNECTING',
+    idle: '', connecting: 'CONNECTING', error: '⚠ ERROR',
     listening: '◉ LISTENING', thinking: '◈ PROCESSING', speaking: '◆ SPEAKING',
   };
 
   const stateColor: Record<ConvState, string> = {
-    idle: 'rgba(245,158,11,0.3)', connecting: CYAN,
+    idle: 'rgba(245,158,11,0.3)', connecting: CYAN, error: '#EF4444',
     listening: AMBER, thinking: CYAN, speaking: GREEN,
   };
 
@@ -343,23 +364,37 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
         )}
       </button>
 
-      {/* Status Label */}
-      {isActive && state !== 'idle' && (
+      {/* Status + Debug */}
+      {isActive && (state !== 'idle' || debugMsg) && (
         <div style={{
           position: 'fixed', bottom: 88, right: 24, zIndex: 100,
-          fontSize: 9, fontFamily: "'JetBrains Mono', monospace",
-          letterSpacing: '0.2em', color,
-          textShadow: `0 0 8px ${color}`,
-          textAlign: 'right', whiteSpace: 'nowrap',
+          textAlign: 'right', maxWidth: 240,
         }}>
-          {stateLabel[state]}
+          {stateLabel[state] && (
+            <div style={{
+              fontSize: 9, fontFamily: "'JetBrains Mono', monospace",
+              letterSpacing: '0.2em', color,
+              textShadow: `0 0 8px ${color}`,
+              whiteSpace: 'nowrap',
+            }}>
+              {stateLabel[state]}
+            </div>
+          )}
+          {debugMsg && (
+            <div style={{
+              fontSize: 8, fontFamily: "'JetBrains Mono', monospace",
+              color: 'rgba(245,158,11,0.4)', marginTop: 2,
+            }}>
+              {debugMsg}
+            </div>
+          )}
         </div>
       )}
 
       {/* Transcript Overlay */}
       {isActive && (transcript || agentText) && (
         <div style={{
-          position: 'fixed', bottom: 100, right: 24, zIndex: 99,
+          position: 'fixed', bottom: 108, right: 24, zIndex: 99,
           maxWidth: 360, display: 'flex', flexDirection: 'column',
           gap: 8, animation: 'cv-up 0.3s ease-out',
         }}>
