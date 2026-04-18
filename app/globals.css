@@ -2,6 +2,22 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  --amber:        #F59E0B;
+  --amber2:       #DC6B0A;
+  --amber-gold:   #FCD34D;
+  --amber-dim:    rgba(245, 158, 11, 0.5);
+  --green:        #22C55E;
+  --red:          #EF4444;
+  --bg:           #050510;
+  --panel-bg:     rgba(20, 12, 0, 0.65);
+  --panel-border: rgba(245, 158, 11, 0.3);
+  --panel-glow:   0 0 24px rgba(245, 158, 11, 0.1), 0 0 60px rgba(220, 107, 10, 0.05), inset 0 1px 0 rgba(245, 158, 11, 0.08);
+  --text-glow:    0 0 8px rgba(245, 158, 11, 0.7), 0 0 20px rgba(220, 107, 10, 0.3);
+  --font-mono:    'JetBrains Mono', 'Courier New', monospace;
+  --font-sans:    'Inter', system-ui, sans-serif;
+}
+
 *, *::before, *::after {
   box-sizing: border-box;
   margin: 0;
@@ -12,5 +28,289 @@ html, body {
   width: 100%;
   height: 100%;
   overflow: hidden;
-  background: #0a0a0a;
+  background: var(--bg);
+  font-family: var(--font-mono);
+  color: var(--amber);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Scanlines overlay ─────────────────────────────────────── */
+.scanlines::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: repeating-linear-gradient(
+    to bottom,
+    transparent 0px,
+    transparent 1px,
+    rgba(0, 0, 0, 0.05) 1px,
+    rgba(0, 0, 0, 0.05) 2px
+  );
+  pointer-events: none;
+  z-index: 9000;
+}
+
+/* ── HUD Panel ─────────────────────────────────────────────── */
+.hud-panel {
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  box-shadow: var(--panel-glow);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  position: absolute;
+  z-index: 10;
+  overflow: hidden;
+}
+
+/* Corner bracket decoration */
+.hud-panel::before,
+.hud-panel::after {
+  content: '';
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border-color: var(--amber);
+  border-style: solid;
+  opacity: 0.5;
+  z-index: 2;
+}
+.hud-panel::before {
+  top: 5px;
+  left: 5px;
+  border-width: 2px 0 0 2px;
+}
+.hud-panel::after {
+  bottom: 5px;
+  right: 5px;
+  border-width: 0 2px 2px 0;
+}
+
+/* Top shimmer line */
+.panel-shimmer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent 0%, var(--amber) 50%, transparent 100%);
+  opacity: 0.45;
+}
+
+/* ── Scanning line animation ───────────────────────────────── */
+.scan-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent 0%, rgba(245, 158, 11, 0.5) 50%, transparent 100%);
+  animation: scan-anim 4s linear infinite;
+  pointer-events: none;
+  z-index: 3;
+}
+
+@keyframes scan-anim {
+  0%   { top: 0%;   opacity: 0;   }
+  5%   { opacity: 0.45; }
+  95%  { opacity: 0.25; }
+  100% { top: 100%; opacity: 0; }
+}
+
+/* ── Text glow ─────────────────────────────────────────────── */
+.glow {
+  text-shadow: var(--text-glow);
+}
+
+/* ── Status dots ───────────────────────────────────────────── */
+.dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.dot-ok {
+  background: #22c55e;
+  box-shadow: 0 0 6px #22c55e, 0 0 12px rgba(34, 197, 94, 0.4);
+}
+
+.dot-error {
+  background: #ef4444;
+  box-shadow: 0 0 6px #ef4444, 0 0 12px rgba(239, 68, 68, 0.4);
+  animation: blink-red 1.1s ease-in-out infinite;
+}
+
+.dot-idle {
+  background: #6b7280;
+  box-shadow: 0 0 4px rgba(107, 114, 128, 0.3);
+}
+
+.dot-running {
+  background: #f59e0b;
+  box-shadow: 0 0 6px #f59e0b, 0 0 14px rgba(245, 158, 11, 0.45);
+  animation: pulse-amber 1.4s ease-in-out infinite;
+}
+
+.dot-unknown {
+  background: #4b5563;
+  box-shadow: 0 0 4px rgba(75, 85, 99, 0.3);
+}
+
+@keyframes blink-red {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.3; }
+}
+
+@keyframes pulse-amber {
+  0%, 100% { box-shadow: 0 0 6px #f59e0b; }
+  50%       { box-shadow: 0 0 14px #f59e0b, 0 0 24px rgba(245, 158, 11, 0.6); }
+}
+
+/* ── Recent job highlight ──────────────────────────────────── */
+.row-recent {
+  animation: row-pulse 2s ease-in-out infinite;
+}
+
+@keyframes row-pulse {
+  0%, 100% { background: rgba(245, 158, 11, 0.04); }
+  50%       { background: rgba(245, 158, 11, 0.10); }
+}
+
+/* ── Alert bar ─────────────────────────────────────────────── */
+.alert-bar-pulse {
+  animation: alert-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes alert-pulse {
+  0%, 100% { box-shadow: none; }
+  50%       { box-shadow: 0 2px 24px rgba(245, 158, 11, 0.3); }
+}
+
+/* ── Activity entries ──────────────────────────────────────── */
+.activity-row {
+  animation: appear 0.4s ease-out forwards;
+}
+
+@keyframes appear {
+  from { opacity: 0; transform: translateX(-6px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+/* ── J.A.R.V.I.S. text pulse ───────────────────────────────── */
+.jarvis-pulse {
+  animation: jarvis-glow 3s ease-in-out infinite;
+}
+
+@keyframes jarvis-glow {
+  0%, 100% { text-shadow: 0 0 10px var(--amber), 0 0 22px var(--amber2); }
+  50%       { text-shadow: 0 0 20px var(--amber), 0 0 40px var(--amber2), 0 0 60px rgba(220, 107, 10, 0.3); }
+}
+
+/* ── Bottom ticker scrolling ───────────────────────────────── */
+.ticker-track {
+  display: flex;
+  white-space: nowrap;
+  animation: ticker-scroll 50s linear infinite;
+}
+
+@keyframes ticker-scroll {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-50%); }
+}
+
+/* ── Alert ticker scrolling ────────────────────────────────── */
+.alert-ticker {
+  display: flex;
+  white-space: nowrap;
+  animation: ticker-scroll 20s linear infinite;
+}
+
+/* ── Scrollbar styling ─────────────────────────────────────── */
+::-webkit-scrollbar       { width: 3px; }
+::-webkit-scrollbar-track { background: rgba(20, 12, 0, 0.3); }
+::-webkit-scrollbar-thumb { background: rgba(245, 158, 11, 0.25); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(245, 158, 11, 0.5); }
+
+/* ── Panel tilt perspective ─────────────────────────────────── */
+.panel-left {
+  transform-origin: left center;
+  transform: perspective(1200px) rotateY(2.5deg);
+}
+
+.panel-right {
+  transform-origin: right center;
+  transform: perspective(1200px) rotateY(-2.5deg);
+}
+
+/* ── Security GAP badges ────────────────────────────────────── */
+.gap-badge {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px;
+  border-radius: 3px;
+  border: 1px solid;
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+  cursor: default;
+  transition: opacity 0.2s;
+}
+
+.gap-badge-clean {
+  background: rgba(34, 197, 94, 0.1);
+  border-color: rgba(34, 197, 94, 0.4);
+  color: #22c55e;
+}
+
+.gap-badge-warning {
+  background: rgba(245, 158, 11, 0.12);
+  border-color: rgba(245, 158, 11, 0.4);
+  color: #F59E0B;
+}
+
+.gap-badge-critical {
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.5);
+  color: #ef4444;
+  animation: blink-red 1.5s ease-in-out infinite;
+}
+
+/* ── BI Freshness cards ─────────────────────────────────────── */
+.freshness-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 8px;
+  border-radius: 3px;
+  border: 1px solid rgba(245, 158, 11, 0.15);
+  background: rgba(20, 12, 0, 0.5);
+  min-width: 44px;
+}
+
+/* ── Section headers ────────────────────────────────────────── */
+.section-header {
+  font-family: var(--font-sans);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--amber);
+  opacity: 0.7;
+  text-shadow: 0 0 6px var(--amber);
+}
+
+/* ── Comms person labels ────────────────────────────────────── */
+.person-gabe   { color: #FCD34D; }
+.person-team   { color: #6EE7B7; }
+.person-system { color: #9CA3AF; }
+
+/* ── Divider between right panel sections ───────────────────── */
+.right-panel-divider {
+  height: 1px;
+  background: linear-gradient(90deg, transparent 0%, rgba(245,158,11,0.3) 50%, transparent 100%);
+  flex-shrink: 0;
 }
