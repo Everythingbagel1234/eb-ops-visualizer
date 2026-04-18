@@ -3,11 +3,9 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 
 /**
- * JARVIS Voice Interface — Browser STT → Bridge → ElevenLabs TTS
- * No ElevenLabs ConvAI dependency. Uses proven components:
- * - Web Speech API for speech recognition
- * - /api/voice endpoint (bridge → Anthropic → ElevenLabs TTS)
- * - Returns real Jarvis responses with voice
+ * JARVIS Mic Button — Browser STT → Anthropic → ElevenLabs TTS
+ * Uses the EXACT same Speech Recognition pattern as the working orb VoiceInterface,
+ * minus the wake word requirement.
  */
 
 const AMBER = '#F59E0B';
@@ -55,21 +53,23 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
 
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const bufferRef = useRef('');
+  const commandBufferRef = useRef('');
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const abortedRef = useRef(false);
-  const listeningStartRef = useRef(0);
-  const isActiveRef = useRef(false);
-  const stateRef = useRef<VState>('idle');
+  // Use voiceState string ref to avoid stale closures (same pattern as working VoiceInterface)
+  const voiceStateRef = useRef<VState>('idle');
 
   const updateState = useCallback((s: VState) => {
     setState(s);
-    stateRef.current = s;
+    voiceStateRef.current = s;
     onStateChange?.(s);
   }, [onStateChange]);
 
-  async function sendToJarvis(text: string) {
+  // ─── Send to Jarvis (same as orb's sendCommand) ──────────
+
+  async function sendCommand(text: string) {
+    if (!text.trim()) return;
     updateState('processing');
+    setTranscript(text);
     setAgentText('');
 
     try {
@@ -80,139 +80,123 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
       });
 
       const data = await res.json() as { response?: string; audio?: string | null };
-
-      if (data.response) {
-        setAgentText(data.response);
-      }
+      if (data.response) setAgentText(data.response);
 
       if (data.audio) {
         updateState('speaking');
         const audio = new Audio(`data:audio/mpeg;base64,${data.audio}`);
         audioRef.current = audio;
-
         audio.onended = () => {
-          updateState('listening');
-          startRecognition(); // Resume listening after speaking
+          updateState('idle');
+          // Auto-restart listening after response
+          setTimeout(() => {
+            if (voiceStateRef.current === 'idle') {
+              startListening();
+            }
+          }, 500);
         };
-
         await audio.play();
       } else {
-        // No audio — resume listening after showing text
-        setTimeout(() => {
-          updateState('listening');
-          startRecognition();
-        }, 2000);
+        updateState('idle');
+        setTimeout(() => startListening(), 1000);
       }
     } catch (err) {
-      console.error('[voice] Error:', err);
-      updateState('listening');
-      startRecognition();
+      console.error('[mic] Error:', err);
+      updateState('idle');
+      setTimeout(() => startListening(), 1000);
     }
   }
 
-  function startRecognition() {
+  // ─── Speech Recognition (copied from working VoiceInterface) ──
+
+  function startListening() {
     const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRec) return;
 
     recognitionRef.current?.abort();
-    abortedRef.current = false;
 
-    const rec = new SpeechRec();
-    recognitionRef.current = rec;
-    rec.continuous = true;
-    rec.interimResults = true;
-    rec.lang = 'en-US';
+    const recognition = new SpeechRec();
+    recognitionRef.current = recognition;
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = 'en-US';
 
-    rec.onresult = (event: SpeechRecognitionEvent) => {
-      let fullTranscript = '';
-      for (let i = 0; i < event.results.length; i++) {
-        fullTranscript += event.results[i][0]?.transcript || '';
-      }
-      bufferRef.current = fullTranscript.trim();
-      setTranscript(bufferRef.current);
+    commandBufferRef.current = '';
+    updateState('listening');
 
-      // Auto-send after 3s of no new results
-      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-      silenceTimerRef.current = setTimeout(() => {
-        if (bufferRef.current.trim()) {
-          const cmd = bufferRef.current.trim();
-          bufferRef.current = '';
-          abortedRef.current = true;
-          rec.stop();
-          sendToJarvis(cmd);
+    // EXACT same pattern as the working orb VoiceInterface
+    recognition.onresult = (event: SpeechRecognitionEvent) => {
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const result = event.results[i];
+
+        if (result.isFinal) {
+          const finalText = result[0]?.transcript || '';
+          commandBufferRef.current += ' ' + finalText;
+          commandBufferRef.current = commandBufferRef.current.trim();
+          setTranscript(commandBufferRef.current);
+
+          // Reset silence timer — 4s of silence then send
+          if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+          silenceTimerRef.current = setTimeout(() => {
+            if (commandBufferRef.current.trim()) {
+              recognition.stop();
+              sendCommand(commandBufferRef.current.trim());
+              commandBufferRef.current = '';
+            }
+          }, 4000);
+        } else {
+          // Show interim transcript
+          const interim = commandBufferRef.current + ' ' + (result[0]?.transcript || '');
+          setTranscript(interim.trim());
         }
-      }, 3000);
-    };
-
-    rec.onerror = (e: SpeechRecognitionErrorEvent) => {
-      if (e.error === 'no-speech' || e.error === 'aborted') return;
-      console.warn('[voice] Recognition error:', e.error);
-    };
-
-    rec.onend = () => {
-      // If we have buffered text and haven't sent yet, send it now
-      if (bufferRef.current.trim() && !abortedRef.current) {
-        if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-        const cmd = bufferRef.current.trim();
-        bufferRef.current = '';
-        abortedRef.current = true;
-        sendToJarvis(cmd);
-        return;
       }
-      // Auto-restart if still active and listening
-      if (!abortedRef.current && isActiveRef.current && stateRef.current === 'listening') {
+    };
+
+    recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
+      if (event.error === 'no-speech') return;
+      console.warn('[mic] Recognition error:', event.error);
+    };
+
+    // EXACT same restart pattern as working VoiceInterface
+    recognition.onend = () => {
+      if (voiceStateRef.current === 'idle' || voiceStateRef.current === 'listening') {
         setTimeout(() => {
-          try {
-            recognitionRef.current?.start();
-          } catch { /* ignore */ }
-        }, 300);
+          try { recognitionRef.current?.start(); } catch { /* ignore */ }
+        }, 500);
       }
     };
 
-    try { rec.start(); } catch { /* ignore */ }
-
-    // Safety: if no speech after 15s, auto-send whatever we have or reset
-    listeningStartRef.current = Date.now();
-    setTimeout(() => {
-      if (Date.now() - listeningStartRef.current >= 14000 && !abortedRef.current) {
-        if (bufferRef.current.trim()) {
-          const cmd = bufferRef.current.trim();
-          bufferRef.current = '';
-          abortedRef.current = true;
-          rec.stop();
-          sendToJarvis(cmd);
-        }
-      }
-    }, 15000);
+    try { recognition.start(); } catch { /* ignore */ }
   }
 
   function startConversation() {
-    if (isActiveRef.current) return;
+    if (isActive) return;
     setIsActive(true);
-    isActiveRef.current = true;
     setTranscript('');
     setAgentText('');
-    bufferRef.current = '';
-    updateState('listening');
-    startRecognition();
+    startListening();
   }
 
   function stopConversation() {
-    abortedRef.current = true;
-    isActiveRef.current = false;
+    setIsActive(false);
     recognitionRef.current?.abort();
     audioRef.current?.pause();
     if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
     recognitionRef.current = null;
     audioRef.current = null;
-    bufferRef.current = '';
+    commandBufferRef.current = '';
     updateState('idle');
-    setIsActive(false);
     setTranscript('');
     setAgentText('');
   }
 
-  useEffect(() => () => { stopConversation(); }, []);
+  useEffect(() => () => {
+    recognitionRef.current?.abort();
+    audioRef.current?.pause();
+    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+  }, []);
+
+  // ─── Render ───────────────────────────────────────────────
 
   const stateLabel: Record<VState, string> = {
     idle: '', listening: '◉ LISTENING', processing: '◈ PROCESSING', speaking: '◆ SPEAKING',
@@ -239,14 +223,10 @@ export default function ConvAIVoice({ onStateChange }: ConvAIVoiceProps) {
         title={isActive ? 'End conversation' : 'Talk to Jarvis'}
       >
         {isActive ? (
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2">
-            <rect x="6" y="6" width="12" height="12" rx="2" />
-          </svg>
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2"><rect x="6" y="6" width="12" height="12" rx="2" /></svg>
         ) : (
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke={AMBER} strokeWidth="2">
-            <rect x="9" y="2" width="6" height="12" rx="3" />
-            <path d="M5 10a7 7 0 0 0 14 0" />
-            <line x1="12" y1="19" x2="12" y2="22" />
+            <rect x="9" y="2" width="6" height="12" rx="3" /><path d="M5 10a7 7 0 0 0 14 0" /><line x1="12" y1="19" x2="12" y2="22" />
           </svg>
         )}
         {isActive && state !== 'idle' && (
