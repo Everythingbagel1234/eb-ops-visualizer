@@ -1,10 +1,14 @@
 'use client';
 
 import { useEffect, useRef, useCallback, useState } from 'react';
+import dynamic from 'next/dynamic';
 import type { CronJob, SecurityData, StatusResponse } from '../api/status/route';
 import type { SlackMessage } from '../api/slack/route';
 import VoiceInterface, { type VoiceState } from './VoiceInterface';
-import ConvAIVoice from './ConvAIVoice';
+// import ConvAIVoice from './ConvAIVoice'; // fallback: ElevenLabs bridge
+import VapiVoice from './VapiVoice';
+
+const UsageChart = dynamic(() => import('./UsageChart'), { ssr: false });
 
 /* ─── Constants ──────────────────────────────────────────────── */
 const AMBER   = '#F59E0B';
@@ -1565,7 +1569,8 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
   const [voiceState, setVoiceState]   = useState<VoiceState>('idle');
   const [drawer, setDrawer]           = useState<DrawerContent | null>(null);
   const [isMobile, setIsMobile]       = useState(false);
-  const [mobileSheet, setMobileSheet] = useState<'crons' | 'activity' | 'security' | null>(null);
+  const [mobileSheet, setMobileSheet] = useState<'crons' | 'activity' | 'security' | 'usage' | null>(null);
+  const [showUsage, setShowUsage]     = useState(false);
 
   // Mobile detection
   useEffect(() => {
@@ -1840,6 +1845,43 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
         bottomOffset={0}
       />}
 
+      {/* Usage drawer toggle — desktop only */}
+      {!isMobile && (
+        <button
+          onClick={() => setShowUsage(v => !v)}
+          style={{
+            position: 'absolute', bottom: 64, right: 14, zIndex: 16,
+            background: showUsage ? 'rgba(245,158,11,0.15)' : 'rgba(14,6,0,0.85)',
+            border: `1px solid ${showUsage ? 'rgba(245,158,11,0.5)' : 'rgba(245,158,11,0.2)'}`,
+            borderRadius: 8, cursor: 'pointer',
+            padding: '5px 14px', display: 'flex', alignItems: 'center', gap: 7,
+            fontFamily: "'JetBrains Mono', monospace",
+            backdropFilter: 'blur(8px)',
+          }}
+        >
+          <span style={{ fontSize: 13 }}>💰</span>
+          <span style={{ fontSize: 8, color: showUsage ? AMBER : 'rgba(245,158,11,0.5)', letterSpacing: '0.15em', fontWeight: 700 }}>
+            {showUsage ? 'HIDE USAGE' : 'LLM USAGE'}
+          </span>
+        </button>
+      )}
+
+      {/* Usage panel — desktop drawer */}
+      {!isMobile && showUsage && (
+        <div style={{
+          position: 'absolute', bottom: 100, right: 14, zIndex: 20,
+          width: 480, maxHeight: 'calc(100vh - 160px)', overflowY: 'auto',
+          background: 'rgba(10,5,0,0.97)', border: `1px solid rgba(245,158,11,0.3)`,
+          borderRadius: 12, padding: '16px 18px',
+          fontFamily: "'JetBrains Mono', monospace",
+          backdropFilter: 'blur(16px)',
+          boxShadow: '0 0 40px rgba(245,158,11,0.08)',
+        }}>
+          <div className="panel-shimmer" />
+          <UsageChart />
+        </div>
+      )}
+
       {/* Bottom HUD — desktop: full strip, mobile: simplified */}
       {!isMobile ? <BottomStrip status={status} now={now} /> : (
         <div style={{
@@ -1853,6 +1895,7 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
             { id: 'crons' as const, icon: '⚡', label: 'Crons', badge: errorCount > 0 ? errorCount : undefined },
             { id: 'activity' as const, icon: '📡', label: 'Activity' },
             { id: 'security' as const, icon: '🔒', label: 'Security' },
+            { id: 'usage' as const, icon: '💰', label: 'Usage' },
           ].map(tab => (
             <button key={tab.id} onClick={() => setMobileSheet(mobileSheet === tab.id ? null : tab.id)} style={{
               background: mobileSheet === tab.id ? 'rgba(245,158,11,0.15)' : 'transparent',
@@ -1886,6 +1929,7 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
               {mobileSheet === 'crons' && `\u26A1 Cron Jobs (${totalCrons})`}
               {mobileSheet === 'activity' && '\uD83D\uDCE1 Activity Feed'}
               {mobileSheet === 'security' && '\uD83D\uDD12 Security'}
+              {mobileSheet === 'usage' && '💰 LLM Usage'}
             </div>
             {mobileSheet === 'crons' && Object.entries(cronGroups).map(([cat, jobs]) => (
               <div key={cat} style={{ marginBottom: 10 }}>
@@ -1930,6 +1974,11 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
                     {item}
                   </div>
                 ))}
+              </div>
+            )}
+            {mobileSheet === 'usage' && (
+              <div style={{ paddingBottom: 8 }}>
+                <UsageChart />
               </div>
             )}
           </div>
@@ -2018,8 +2067,10 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
         </div>
       )}
 
-      {/* Conversational AI Voice — custom UI, real Jarvis via bridge */}
-      <ConvAIVoice />
+      {/* Primary voice: Vapi (working April 25, 2026) */}
+      <VapiVoice />
+      {/* ConvAIVoice kept as fallback (ElevenLabs bridge) */}
+      {/* <ConvAIVoice /> */}
     </div>
   );
 }
