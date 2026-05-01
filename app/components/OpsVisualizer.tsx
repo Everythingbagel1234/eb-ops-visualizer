@@ -15,6 +15,8 @@ const InteractionGraph = dynamic(() => import('./InteractionGraph'), { ssr: fals
 const TokenBurnRate    = dynamic(() => import('./TokenBurnRate'),    { ssr: false });
 const GmailPanel       = dynamic(() => import('./GmailPanel'),       { ssr: false });
 const ChannelHeatmap   = dynamic(() => import('./ChannelHeatmap'),   { ssr: false });
+const ActiveWork       = dynamic(() => import('./ActiveWork'),       { ssr: false });
+const NativeVoice      = dynamic(() => import('./NativeVoice'),      { ssr: false });
 
 /* ─── Constants ──────────────────────────────────────────────── */
 const AMBER   = '#F59E0B';
@@ -673,6 +675,11 @@ function LeftPanel({ cronGroups, totalCrons, errorCount, topOffset, slack, gmail
         <span style={{ fontSize: 7.5, color: 'rgba(245,158,11,0.4)', fontFamily: "'JetBrains Mono', monospace" }}>
           {slack.length} MSG
         </span>
+      </div>
+
+      {/* Active Work */}
+      <div style={{ flexShrink: 0, padding: '4px 0' }}>
+        <ActiveWork sessions={sessions || []} />
       </div>
 
       {/* Interaction Graph */}
@@ -1585,7 +1592,7 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
   const [voiceState, setVoiceState]   = useState<VoiceState>('idle');
   const [drawer, setDrawer]           = useState<DrawerContent | null>(null);
   const [isMobile, setIsMobile]       = useState(false);
-  const [mobileSheet, setMobileSheet] = useState<'crons' | 'activity' | 'security' | 'usage' | 'gmail' | null>(null);
+  const [mobileSheet, setMobileSheet] = useState<'crons' | 'activity' | 'security' | 'usage' | 'gmail' | 'tasks' | null>(null);
   const [showUsage, setShowUsage]         = useState(false);
   const [interactionsData, setInteractionsData] = useState<InteractionsData | null>(null);
   const [usageData, setUsageData]         = useState<OpsUsageData | null>(null);
@@ -1948,6 +1955,7 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
         }}>
           {[
             { id: 'crons' as const, icon: '⚡', label: 'Crons', badge: errorCount > 0 ? errorCount : undefined },
+            { id: 'tasks' as const, icon: '⚡', label: 'Tasks', badge: (status?.sessions?.list?.length ?? 0) > 0 ? status?.sessions?.list?.length : undefined },
             { id: 'activity' as const, icon: '📡', label: 'Activity' },
             { id: 'security' as const, icon: '🔒', label: 'Security' },
             { id: 'usage' as const, icon: '💰', label: 'Usage' },
@@ -1987,7 +1995,11 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
               {mobileSheet === 'security' && '\uD83D\uDD12 Security'}
               {mobileSheet === 'usage' && '💰 LLM Usage'}
               {mobileSheet === 'gmail' && '📧 Gmail'}
+              {mobileSheet === 'tasks' && '⚡ Active Tasks'}
             </div>
+            {mobileSheet === 'tasks' && (
+              <ActiveWork sessions={status?.sessions?.list || []} />
+            )}
             {mobileSheet === 'crons' && Object.entries(cronGroups).map(([cat, jobs]) => (
               <div key={cat} style={{ marginBottom: 10 }}>
                 <div style={{ fontSize: 8, color: 'rgba(245,158,11,0.5)', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 4 }}>{cat}</div>
@@ -2141,6 +2153,9 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
 
       {/* Primary voice: Vapi (working April 25, 2026) */}
       <VapiVoice />
+
+      {/* Native Voice — Web Speech API (primary, no third-party) */}
+      <NativeVoice onStateChange={handleVoiceStateChange} />
       {/* ConvAIVoice kept as fallback (ElevenLabs bridge) */}
       {/* <ConvAIVoice /> */}
     </div>
