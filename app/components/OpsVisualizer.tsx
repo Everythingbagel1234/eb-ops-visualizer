@@ -10,7 +10,7 @@ import VoiceInterface, { type VoiceState } from './VoiceInterface';
 // import ConvAIVoice from './ConvAIVoice'; // fallback: ElevenLabs bridge
 import VapiVoice from './VapiVoice';
 
-const UsageChart = dynamic(() => import('./UsageChart'), { ssr: false });
+// const UsageChart = dynamic(() => import('./UsageChart'), { ssr: false }); // replaced by TokenBurnRate
 const InteractionGraph = dynamic(() => import('./InteractionGraph'), { ssr: false });
 const TokenBurnRate    = dynamic(() => import('./TokenBurnRate'),    { ssr: false });
 const GmailPanel       = dynamic(() => import('./GmailPanel'),       { ssr: false });
