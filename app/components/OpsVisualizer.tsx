@@ -2,13 +2,19 @@
 
 import { useEffect, useRef, useCallback, useState } from 'react';
 import dynamic from 'next/dynamic';
-import type { CronJob, SecurityData, StatusResponse } from '../api/status/route';
+import type { CronJob, CommEntry, SecurityData, StatusResponse } from '../api/status/route';
 import type { SlackMessage } from '../api/slack/route';
+import type { OpsUsageData } from '../api/ops-usage/route';
+import type { GmailThread } from './GmailPanel';
 import VoiceInterface, { type VoiceState } from './VoiceInterface';
 // import ConvAIVoice from './ConvAIVoice'; // fallback: ElevenLabs bridge
 import VapiVoice from './VapiVoice';
 
 const UsageChart = dynamic(() => import('./UsageChart'), { ssr: false });
+const InteractionGraph = dynamic(() => import('./InteractionGraph'), { ssr: false });
+const TokenBurnRate    = dynamic(() => import('./TokenBurnRate'),    { ssr: false });
+const GmailPanel       = dynamic(() => import('./GmailPanel'),       { ssr: false });
+const ChannelHeatmap   = dynamic(() => import('./ChannelHeatmap'),   { ssr: false });
 
 /* ─── Constants ──────────────────────────────────────────────── */
 const AMBER   = '#F59E0B';
@@ -92,6 +98,13 @@ interface DrawerContent {
   type: 'cron' | 'team' | 'feed';
   title: string;
   data: unknown;
+}
+
+interface InteractionsData {
+  slack?: SlackMessage[];
+  gmail?: { unreadCount?: number; threads?: GmailThread[] };
+  asana?: unknown[];
+  sessions?: unknown[];
 }
 
 /* ─── Helpers ────────────────────────────────────────────────── */
@@ -299,7 +312,7 @@ function drawOrb(
   ctx: CanvasRenderingContext2D,
   cx: number, cy: number, minDim: number, t: number,
   crons: CronJob[], gwHealthy: boolean, sessions: number,
-  voiceState: VoiceState,
+  voiceState: VoiceState, version?: string,
 ) {
   const orbR = minDim * 0.14;
   const tickR = minDim * 0.32;
@@ -504,7 +517,7 @@ function drawOrb(
   ctx.fillStyle  = gwColor;
   ctx.shadowBlur = 6;
   ctx.shadowColor = gwColor;
-  ctx.fillText(`GW: ${gwHealthy ? 'ONLINE' : 'OFFLINE'}`, cx, labelY + fz * 1.4);
+  ctx.fillText(`GW: ${gwHealthy ? 'ONLINE' : 'OFFLINE'}${version ? ` ${version}` : ''}`, cx, labelY + fz * 1.4);
   ctx.shadowBlur = 0;
 
   ctx.font      = `400 ${Math.max(8, minDim * 0.013)}px 'JetBrains Mono', monospace`;
@@ -519,12 +532,15 @@ interface LeftPanelProps {
   totalCrons: number;
   errorCount: number;
   topOffset: number;
-  feedEntries: CCEntry[];
+  slack: SlackMessage[];
+  gmailData: { unreadCount?: number; threads?: GmailThread[] } | null;
+  asana: unknown[] | null;
+  sessions: unknown[];
+  recentComms: CommEntry[];
   onCronClick: (job: CronJob) => void;
-  onFeedClick: (entry: CCEntry) => void;
 }
 
-function LeftPanel({ cronGroups, totalCrons, errorCount, topOffset, feedEntries, onCronClick, onFeedClick }: LeftPanelProps) {
+function LeftPanel({ cronGroups, totalCrons, errorCount, topOffset, slack, gmailData, asana, sessions, recentComms, onCronClick }: LeftPanelProps) {
   const okCount   = Object.values(cronGroups).flat().filter(c => c.lastStatus === 'ok').length;
   const idleCount = Object.values(cronGroups).flat().filter(c => c.lastStatus === 'idle').length;
 
@@ -644,7 +660,7 @@ function LeftPanel({ cronGroups, totalCrons, errorCount, topOffset, feedEntries,
         )}
       </div>
 
-      {/* Live Feed divider */}
+      {/* Interaction Graph divider */}
       <div style={{
         borderTop: '1px solid rgba(245,158,11,0.15)',
         padding: '5px 14px 4px',
@@ -652,55 +668,54 @@ function LeftPanel({ cronGroups, totalCrons, errorCount, topOffset, feedEntries,
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
       }}>
         <span style={{ fontSize: 8.5, color: AMBER, letterSpacing: '0.2em', fontWeight: 700, fontFamily: "'Inter', sans-serif" }}>
-          LIVE FEED
+          INTERACTIONS
         </span>
-        <span style={{ display: 'flex', gap: 8, fontSize: 8 }}>
-          <span style={{ color: AMBER }}>■ SLACK</span>
-          <span style={{ color: CYAN }}>■ CC</span>
+        <span style={{ fontSize: 7.5, color: 'rgba(245,158,11,0.4)', fontFamily: "'JetBrains Mono', monospace" }}>
+          {slack.length} MSG
         </span>
       </div>
 
-      {/* Combined live feed */}
-      <div style={{ flex: '4 1 0', overflowY: 'auto', padding: '2px 0' }}>
-        {feedEntries.map((entry, i) => {
-          const isSlack = entry.source === 'slack';
-          const color = isSlack ? AMBER : CYAN;
-          const preview = entry.text.length > 55 ? entry.text.slice(0, 55) + '…' : entry.text;
-          return (
-            <div
-              key={`feed-${i}`}
-              onClick={() => onFeedClick(entry)}
-              className="slack-slide-in"
-              style={{
-                padding: '4px 12px',
-                borderLeft: `2px solid ${color}30`,
-                marginBottom: 1,
-                cursor: 'pointer',
-                animationDelay: `${i * 0.03}s`,
-              }}
-              onMouseEnter={e => (e.currentTarget.style.background = `rgba(${isSlack ? '245,158,11' : '34,211,238'},0.05)`)}
-              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-            >
-              <div style={{
-                fontSize: 7.5, color: 'rgba(245,158,11,0.35)',
-                fontFamily: "'JetBrains Mono', monospace",
-                display: 'flex', gap: 4, alignItems: 'center', marginBottom: 2,
-              }}>
-                <span style={{ color, fontWeight: 700 }}>{isSlack ? 'SLK' : 'CC'}</span>
-                <span>[{entry.time}]</span>
-                <span style={{ color, fontWeight: 700 }}>{entry.person}</span>
-              </div>
-              <div style={{
-                fontSize: 9, color: 'rgba(245,158,11,0.75)',
-                whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-                fontFamily: "'JetBrains Mono', monospace",
-              }}>
-                {preview}
-              </div>
+      {/* Interaction Graph */}
+      <div style={{ flexShrink: 0, padding: '4px 0', display: 'flex', justifyContent: 'center' }}>
+        <InteractionGraph
+          slack={slack}
+          gmail={gmailData}
+          asana={asana}
+          sessions={sessions}
+        />
+      </div>
+
+      {/* Recent activity list */}
+      <div style={{ flex: '2 1 0', overflowY: 'auto', padding: '2px 0' }}>
+        {recentComms.slice(0, 6).map((entry, i) => (
+          <div
+            key={`rc-${i}`}
+            className="slack-slide-in"
+            style={{
+              padding: '3px 12px',
+              borderLeft: '2px solid rgba(245,158,11,0.18)',
+              marginBottom: 1,
+              animationDelay: `${i * 0.03}s`,
+            }}
+          >
+            <div style={{
+              fontSize: 7.5, color: 'rgba(245,158,11,0.35)',
+              fontFamily: "'JetBrains Mono', monospace",
+              display: 'flex', gap: 4, alignItems: 'center', marginBottom: 1,
+            }}>
+              <span>[{entry.time}]</span>
+              <span style={{ color: AMBER, fontWeight: 700 }}>{entry.person}</span>
             </div>
-          );
-        })}
-        {feedEntries.length === 0 && (
+            <div style={{
+              fontSize: 9, color: 'rgba(245,158,11,0.75)',
+              whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+              fontFamily: "'JetBrains Mono', monospace",
+            }}>
+              {entry.action}
+            </div>
+          </div>
+        ))}
+        {recentComms.length === 0 && (
           <div style={{ padding: 12, textAlign: 'center', color: 'rgba(245,158,11,0.2)', fontSize: 9 }}>
             NO RECENT ACTIVITY
           </div>
@@ -810,7 +825,7 @@ interface RightPanelProps {
   security: SecurityData;
   topOffset: number;
   teamActivity: TeamActivity[];
-  ccEntries: CCEntry[];
+  gmailData: { unreadCount?: number; threads?: GmailThread[] } | null;
   onMemberClick: (member: TeamMember, activity: TeamActivity) => void;
   onFeedClick: (entry: CCEntry) => void;
 }
@@ -823,7 +838,7 @@ function slackMsgColor(msg: SlackMessage): string {
 
 
 
-function RightPanel({ slackMessages, slackLive, security, topOffset, teamActivity, ccEntries, onMemberClick, onFeedClick }: RightPanelProps) {
+function RightPanel({ slackMessages, slackLive, security, topOffset, teamActivity, gmailData, onMemberClick, onFeedClick }: RightPanelProps) {
   const { gapStatuses, activeThreats, lastAudit } = security;
 
   const auditTime = (() => {
@@ -833,19 +848,15 @@ function RightPanel({ slackMessages, slackLive, security, topOffset, teamActivit
     } catch { return '—'; }
   })();
 
-  // Interleaved feed for right panel (Slack + CC)
-  const allFeed: CCEntry[] = [
-    ...slackMessages.map((msg): CCEntry => ({
-      id: msg.timestamp,
-      source: 'slack',
-      text: msg.text,
-      person: msg.person,
-      time: msg.time,
-      timestamp: msg.timestamp * 1000,
-      created_at: new Date(msg.timestamp * 1000).toISOString(),
-    })),
-    ...ccEntries.filter(e => e.source === 'cc'),
-  ].sort((a, b) => b.timestamp - a.timestamp).slice(0, 12);
+  const slackFeed: CCEntry[] = slackMessages.map((msg): CCEntry => ({
+    id: msg.timestamp,
+    source: 'slack',
+    text: msg.text,
+    person: msg.person,
+    time: msg.time,
+    timestamp: msg.timestamp * 1000,
+    created_at: new Date(msg.timestamp * 1000).toISOString(),
+  }));
 
   return (
     <div
@@ -858,8 +869,8 @@ function RightPanel({ slackMessages, slackLive, security, topOffset, teamActivit
       <div className="panel-shimmer" />
       <div className="scan-line" style={{ animationDelay: '-2.1s' }} />
 
-      {/* ── Team Heatmap (top ~50%) ──── */}
-      <div style={{ flex: '5 1 0', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+      {/* ── Team Status (top ~33%) ──── */}
+      <div style={{ flex: '3 1 0', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
         <div style={{
           padding: '7px 14px 5px', flexShrink: 0,
           borderBottom: '1px solid rgba(245,158,11,0.12)',
@@ -873,15 +884,24 @@ function RightPanel({ slackMessages, slackLive, security, topOffset, teamActivit
         <TeamHeatmap teamActivity={teamActivity} onMemberClick={onMemberClick} />
       </div>
 
-      {/* ── Comms Feed (bottom ~50%) ──── */}
-      <div style={{ flex: '5 1 0', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+      {/* ── Gmail (middle ~33%) ──── */}
+      <div style={{ flex: '3 1 0', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+        <div className="right-panel-divider" />
+        <GmailPanel
+          unreadCount={gmailData?.unreadCount ?? 0}
+          threads={gmailData?.threads ?? []}
+        />
+      </div>
+
+      {/* ── Slack Feed (bottom ~33%) ──── */}
+      <div style={{ flex: '4 1 0', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
         <div className="right-panel-divider" />
         <div style={{
           padding: '7px 14px 5px', flexShrink: 0,
           borderBottom: '1px solid rgba(245,158,11,0.12)',
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         }}>
-          <span className="section-header">COMMUNICATIONS</span>
+          <span className="section-header">SLACK FEED</span>
           {slackLive && (
             <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
               <span className="live-dot" style={{
@@ -898,11 +918,9 @@ function RightPanel({ slackMessages, slackLive, security, topOffset, teamActivit
         </div>
 
         <div style={{ flex: 1, overflowY: 'auto', padding: '4px 0' }}>
-          {allFeed.map((entry, i) => {
-            const isSlack = entry.source === 'slack';
-            const color = isSlack ? slackMsgColor({ isGabe: entry.person === 'Gabe', isBot: false, text: '', channel: '', time: '', timestamp: 0, person: entry.person }) : CYAN;
+          {slackFeed.map((entry, i) => {
+            const color = slackMsgColor({ isGabe: entry.person === 'Gabe', isBot: false, text: '', channel: '', time: '', timestamp: 0, person: entry.person });
             const preview = entry.text.length > 55 ? entry.text.slice(0, 55) + '…' : entry.text;
-            const badge = isSlack ? AMBER : CYAN;
             return (
               <div
                 key={`rf-${i}`}
@@ -926,11 +944,9 @@ function RightPanel({ slackMessages, slackLive, security, topOffset, teamActivit
                   <span>[{entry.time}]</span>
                   <span style={{ color, fontWeight: 700 }}>{entry.person}</span>
                   <span style={{
-                    color: badge, fontWeight: 700,
-                    background: `${badge}18`, padding: '0 4px', borderRadius: 3, fontSize: 7.5,
-                  }}>
-                    {isSlack ? 'SLK' : 'CC'}
-                  </span>
+                    color: AMBER, fontWeight: 700,
+                    background: `${AMBER}18`, padding: '0 4px', borderRadius: 3, fontSize: 7.5,
+                  }}>SLK</span>
                 </div>
                 <div style={{
                   fontSize: 9.5, color: 'rgba(245,158,11,0.82)',
@@ -942,7 +958,7 @@ function RightPanel({ slackMessages, slackLive, security, topOffset, teamActivit
               </div>
             );
           })}
-          {allFeed.length === 0 && (
+          {slackFeed.length === 0 && (
             <div style={{ padding: 16, textAlign: 'center', color: 'rgba(245,158,11,0.22)', fontSize: 9, fontFamily: "'JetBrains Mono', monospace" }}>
               {slackLive ? 'NO RECENT MESSAGES…' : 'CONNECTING…'}
             </div>
@@ -1569,8 +1585,10 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
   const [voiceState, setVoiceState]   = useState<VoiceState>('idle');
   const [drawer, setDrawer]           = useState<DrawerContent | null>(null);
   const [isMobile, setIsMobile]       = useState(false);
-  const [mobileSheet, setMobileSheet] = useState<'crons' | 'activity' | 'security' | 'usage' | null>(null);
-  const [showUsage, setShowUsage]     = useState(false);
+  const [mobileSheet, setMobileSheet] = useState<'crons' | 'activity' | 'security' | 'usage' | 'gmail' | null>(null);
+  const [showUsage, setShowUsage]         = useState(false);
+  const [interactionsData, setInteractionsData] = useState<InteractionsData | null>(null);
+  const [usageData, setUsageData]         = useState<OpsUsageData | null>(null);
 
   // Mobile detection
   useEffect(() => {
@@ -1661,6 +1679,37 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
     return () => clearInterval(id);
   }, [fetchCC]);
 
+  /* Interactions (gmail, asana, sessions) */
+  const fetchInteractions = useCallback(async () => {
+    const CC = process.env.NEXT_PUBLIC_CC_API_URL || 'https://eb-command-center.vercel.app';
+    try {
+      const res  = await fetch(`${CC}/api/ops-interactions`, { cache: 'no-store', signal: AbortSignal.timeout(10000) });
+      const data = await res.json() as InteractionsData;
+      setInteractionsData(data);
+    } catch { /* keep stale */ }
+  }, []);
+
+  useEffect(() => {
+    fetchInteractions();
+    const id = setInterval(fetchInteractions, 30_000);
+    return () => clearInterval(id);
+  }, [fetchInteractions]);
+
+  /* Usage data */
+  const fetchUsage = useCallback(async () => {
+    try {
+      const res  = await fetch('/api/ops-usage', { cache: 'no-store', signal: AbortSignal.timeout(15000) });
+      const data = await res.json() as OpsUsageData;
+      setUsageData(data);
+    } catch { /* keep stale */ }
+  }, []);
+
+  useEffect(() => {
+    fetchUsage();
+    const id = setInterval(fetchUsage, 60_000);
+    return () => clearInterval(id);
+  }, [fetchUsage]);
+
   /* Render loop */
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -1695,7 +1744,7 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
       drawGrid(ctx, w, h);
       drawOrb(ctx, cx, cy, minDim, t,
         s?.crons ?? [], s?.gateway.healthy ?? false, s?.sessions.active ?? 0,
-        voiceStateRef.current);
+        voiceStateRef.current, s?.gateway.version);
 
       if (s && Math.random() < 0.06 && particlesRef.current.length < 80) {
         particlesRef.current.push(spawnParticle(cx, cy, hasErrors));
@@ -1822,9 +1871,12 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
         totalCrons={totalCrons}
         errorCount={errorCount}
         topOffset={topOffset}
-        feedEntries={combinedFeed}
+        slack={slackMessages}
+        gmailData={interactionsData?.gmail ?? null}
+        asana={interactionsData?.asana ?? null}
+        sessions={interactionsData?.sessions ?? status?.sessions.list ?? []}
+        recentComms={status?.recentComms ?? []}
         onCronClick={openCronDrawer}
-        onFeedClick={openFeedDrawer}
       />}
 
       {/* Right panel — desktop only */}
@@ -1834,7 +1886,7 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
         security={security ?? { gapStatuses: [], activeThreats: 0, lastAudit: '', highItems: [] }}
         topOffset={topOffset}
         teamActivity={teamActivity}
-        ccEntries={combinedFeed}
+        gmailData={interactionsData?.gmail ?? null}
         onMemberClick={openTeamDrawer}
         onFeedClick={openFeedDrawer}
       />}
@@ -1871,14 +1923,17 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
         <div style={{
           position: 'absolute', bottom: 100, right: 14, zIndex: 20,
           width: 480, maxHeight: 'calc(100vh - 160px)', overflowY: 'auto',
-          background: 'rgba(10,5,0,0.97)', border: `1px solid rgba(245,158,11,0.3)`,
-          borderRadius: 12, padding: '16px 18px',
+          background: 'rgba(14,6,0,0.92)', border: '1px solid rgba(245,158,11,0.2)',
+          borderRadius: 8, padding: '16px 18px',
           fontFamily: "'JetBrains Mono', monospace",
-          backdropFilter: 'blur(16px)',
+          backdropFilter: 'blur(12px)',
           boxShadow: '0 0 40px rgba(245,158,11,0.08)',
         }}>
           <div className="panel-shimmer" />
-          <UsageChart />
+          <TokenBurnRate data={usageData} />
+          <div style={{ marginTop: 16, paddingTop: 14, borderTop: '1px solid rgba(245,158,11,0.15)' }}>
+            <ChannelHeatmap interactions={combinedFeed.map(e => ({ timestamp: e.timestamp, source: e.source }))} />
+          </div>
         </div>
       )}
 
@@ -1896,6 +1951,7 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
             { id: 'activity' as const, icon: '📡', label: 'Activity' },
             { id: 'security' as const, icon: '🔒', label: 'Security' },
             { id: 'usage' as const, icon: '💰', label: 'Usage' },
+            { id: 'gmail' as const, icon: '📧', label: 'Gmail', badge: (interactionsData?.gmail?.unreadCount ?? 0) > 0 ? interactionsData?.gmail?.unreadCount : undefined },
           ].map(tab => (
             <button key={tab.id} onClick={() => setMobileSheet(mobileSheet === tab.id ? null : tab.id)} style={{
               background: mobileSheet === tab.id ? 'rgba(245,158,11,0.15)' : 'transparent',
@@ -1930,6 +1986,7 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
               {mobileSheet === 'activity' && '\uD83D\uDCE1 Activity Feed'}
               {mobileSheet === 'security' && '\uD83D\uDD12 Security'}
               {mobileSheet === 'usage' && '💰 LLM Usage'}
+              {mobileSheet === 'gmail' && '📧 Gmail'}
             </div>
             {mobileSheet === 'crons' && Object.entries(cronGroups).map(([cat, jobs]) => (
               <div key={cat} style={{ marginBottom: 10 }}>
@@ -1950,15 +2007,30 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
                 })}
               </div>
             ))}
-            {mobileSheet === 'activity' && combinedFeed.slice(0, 20).map((entry, i) => (
-              <div key={i} style={{
-                padding: '8px 10px', borderLeft: `2px solid rgba(245,158,11,0.3)`, marginBottom: 4,
-                background: 'rgba(245,158,11,0.03)', borderRadius: '0 6px 6px 0',
-              }}>
-                <div style={{ fontSize: 9, color: 'rgba(245,158,11,0.5)' }}>{entry.time} · {entry.person}</div>
-                <div style={{ fontSize: 10, color: AMBER, marginTop: 2 }}>{entry.text}</div>
+            {mobileSheet === 'activity' && (
+              <>
+                <div style={{ marginBottom: 12 }}>
+                  <ChannelHeatmap interactions={combinedFeed.map(e => ({ timestamp: e.timestamp, source: e.source }))} />
+                </div>
+                {combinedFeed.slice(0, 20).map((entry, i) => (
+                  <div key={i} style={{
+                    padding: '8px 10px', borderLeft: `2px solid rgba(245,158,11,0.3)`, marginBottom: 4,
+                    background: 'rgba(245,158,11,0.03)', borderRadius: '0 6px 6px 0',
+                  }}>
+                    <div style={{ fontSize: 9, color: 'rgba(245,158,11,0.5)' }}>{entry.time} · {entry.person}</div>
+                    <div style={{ fontSize: 10, color: AMBER, marginTop: 2 }}>{entry.text}</div>
+                  </div>
+                ))}
+              </>
+            )}
+            {mobileSheet === 'gmail' && (
+              <div style={{ paddingBottom: 8 }}>
+                <GmailPanel
+                  unreadCount={interactionsData?.gmail?.unreadCount ?? 0}
+                  threads={interactionsData?.gmail?.threads ?? []}
+                />
               </div>
-            ))}
+            )}
             {mobileSheet === 'security' && (
               <div style={{ fontSize: 10, color: AMBER }}>
                 <div style={{ marginBottom: 8 }}>Active Threats: <span style={{ color: (security?.activeThreats ?? 0) > 0 ? RED : GREEN, fontWeight: 700 }}>{security?.activeThreats ?? 0}</span></div>
@@ -1978,7 +2050,7 @@ export default function OpsVisualizer({ transparent }: { transparent: boolean })
             )}
             {mobileSheet === 'usage' && (
               <div style={{ paddingBottom: 8 }}>
-                <UsageChart />
+                <TokenBurnRate data={usageData} />
               </div>
             )}
           </div>
